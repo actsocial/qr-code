@@ -1,0 +1,219 @@
+package asia.wildfire.utils;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+public class TaskContext {
+	
+	private Integer CAPACITY = 100;
+	
+	private final Integer ROUTINE_TASK_CONSUME = 12;
+	
+	private final Integer HOURLY_TASK_CONSUME = 8;
+	
+	private final Integer EXPORT_TASK_CONSUME = 18;
+	
+	private final Integer ONDEMAND_TASK_CONSUME = 20;
+	
+	private final Integer REPORT_TASK_CONSUME = 10;
+	
+	private Map<String,Boolean> routineTaskMap;
+	
+	private Map<String,Boolean> hourlyTaskMap;
+	
+	private Map<String,Boolean> exportTaskMap;
+	
+	private Map<String,Boolean> ondemandTaskMap;
+	
+	private Map<String,Boolean> reportTaskMap;
+	
+	private static TaskContext taskContext;
+	
+	private TaskContext() {
+		routineTaskMap = new HashMap<String,Boolean>();
+		hourlyTaskMap = new HashMap<String,Boolean>();
+		exportTaskMap = new HashMap<String,Boolean>();
+		ondemandTaskMap = new HashMap<String,Boolean>();
+	}
+	
+	public void addRoutineTask(String scope){
+		synchronized (CAPACITY) {
+			routineTaskMap.put(scope.toLowerCase(), Boolean.TRUE);
+			CAPACITY = CAPACITY - ROUTINE_TASK_CONSUME;
+		}
+	}
+	
+	public void finishRoutineTask(String scope){
+		if(scope == null){
+			return;
+		}
+		synchronized (routineTaskMap) {
+			routineTaskMap.remove(scope.toLowerCase());
+		}
+	}
+	
+	public int getRoutineTaskCount(){
+		synchronized (routineTaskMap) {
+			return routineTaskMap.size();
+		}
+	}
+	
+	public Set<String> getRoutineTask(){
+		synchronized (routineTaskMap) {
+			return routineTaskMap.keySet();
+		}
+	}
+	
+	public boolean canRunRoutineTask(){
+		synchronized (CAPACITY) {
+			return CAPACITY - ROUTINE_TASK_CONSUME >= 0;
+		} 
+	}
+	
+	public void addHourlyTask(String scope){
+		if(scope == null){
+			return;
+		}
+		synchronized (hourlyTaskMap) {
+			hourlyTaskMap.put(scope.toLowerCase(), Boolean.TRUE);
+		}
+	}
+	
+	public void finishHourlyTask(String scope){
+		synchronized (hourlyTaskMap) {
+			hourlyTaskMap.remove(scope.toLowerCase());
+		}
+	}
+	
+	public int getHourlyTaskCount(){
+		synchronized (hourlyTaskMap) {
+			return hourlyTaskMap.size();
+		}
+	}
+	
+	public Set<String> getHourlyTask(){
+		synchronized (hourlyTaskMap) {
+			return hourlyTaskMap.keySet();
+		}
+	}
+	
+	public boolean canRunHourlyTask(){
+		synchronized (CAPACITY) {
+			return CAPACITY - HOURLY_TASK_CONSUME >= 0;
+		} 
+	}
+
+	public void addExportTask(String scope){
+		synchronized (exportTaskMap) {
+			exportTaskMap.put(scope.toLowerCase(), Boolean.TRUE);
+		}
+	}
+	
+	public void finishExportTask(String scope){
+		if(scope == null){
+			return;
+		}
+		synchronized (exportTaskMap) {
+			exportTaskMap.remove(scope.toLowerCase());
+		}
+	}
+	
+	public int getExportTaskCount(){
+		synchronized (exportTaskMap) {
+			return exportTaskMap.size();
+		}
+	}
+	
+	public Set<String> getExportTask(){
+		synchronized (exportTaskMap) {
+			return exportTaskMap.keySet();
+		}
+	}
+	
+	public boolean canRunExportTask(){
+		synchronized (CAPACITY) {
+			return CAPACITY - EXPORT_TASK_CONSUME >= 0;
+		}
+	}
+	
+	public void addOndemandTask(String scope){
+		synchronized (ondemandTaskMap) {
+			ondemandTaskMap.put(scope.toLowerCase(), Boolean.TRUE);
+		}
+	}
+	
+	public void finishOndemandTask(String scope){
+		if(scope == null){
+			return;
+		}
+		synchronized (ondemandTaskMap) {
+			ondemandTaskMap.remove(scope.toLowerCase());
+		}
+	}
+	
+	public int getOndemandTaskCount(){
+		synchronized (ondemandTaskMap) {
+			return ondemandTaskMap.size();
+		}
+	}
+	
+	public Set<String> getOndemandTask(){
+		synchronized (ondemandTaskMap) {
+			return ondemandTaskMap.keySet();
+		}
+	}
+	
+	public boolean canRunOndemandTask(){
+		synchronized (CAPACITY) {
+			return CAPACITY - ONDEMAND_TASK_CONSUME >= 0;
+		} 
+	}
+	
+	public void addReportTask(String scope){
+		synchronized (reportTaskMap) {
+			reportTaskMap.put(scope.toLowerCase(), Boolean.TRUE);
+		}
+	}
+	
+	public void finishReportTask(String scope){
+		if(scope == null){
+			return;
+		}
+		synchronized (reportTaskMap) {
+			reportTaskMap.remove(scope.toLowerCase());
+		}
+	}
+	
+	public int getReportTaskCount(){
+		synchronized (reportTaskMap) {
+			return reportTaskMap.size();
+		}
+	}
+	
+	public Set<String> getReportTask(){
+		synchronized (reportTaskMap) {
+			return reportTaskMap.keySet();
+		}
+	}
+	
+	public boolean canRunReportTask(){
+		synchronized (CAPACITY) {
+			return CAPACITY - REPORT_TASK_CONSUME >= 0;
+		}
+	}
+	
+	public synchronized static TaskContext getInstance(){
+		if(taskContext == null){
+			taskContext =  new TaskContext();
+		}
+		return taskContext;
+	}
+
+	@Override
+	public String toString() {
+		return "TaskContext routine task["+this.getRoutineTask()+"],hourly task["+this.getHourlyTask()+"],export task["+this.getExportTask()+"],ondemand task["+this.getOndemandTask()+"]";
+	}
+
+	
+}

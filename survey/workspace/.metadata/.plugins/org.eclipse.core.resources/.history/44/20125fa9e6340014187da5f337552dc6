@@ -1,0 +1,2137 @@
+package asia.wildfire.actsocial.impl;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Timestamp;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import asia.wildfire.actsocial.ActsocialWeiboDataService;
+import asia.wildfire.actsocial.dao.ModuleDao;
+import asia.wildfire.actsocial.dao.WeiboAnalyticDao;
+import asia.wildfire.actsocial.dao.WeiboCommentRetweetHourDistributionDao;
+import asia.wildfire.actsocial.dao.WeiboDashboardDao;
+import asia.wildfire.actsocial.dao.WeiboExposureDao;
+import asia.wildfire.actsocial.dao.WeiboKolCuserFollowerResultDao;
+import asia.wildfire.actsocial.dao.WeiboSourceDistributionDao;
+import asia.wildfire.actsocial.dao.WeiboTopPostDao;
+import asia.wildfire.actsocial.dao.WeiboTopicDao;
+import asia.wildfire.actsocial.model.*;
+import asia.wildfire.common.dao.CrmCuserFollowerDao;
+import asia.wildfire.common.dao.CrmFollowerTrackerDao;
+import asia.wildfire.common.dao.CrmRetweetDao;
+import asia.wildfire.common.dao.CrmTweetCommentsDao;
+import asia.wildfire.common.dao.CrmTweetsDao;
+import asia.wildfire.common.dao.CrmUsersDao;
+import asia.wildfire.common.model.redshift.CrmFollowerTracker;
+import asia.wildfire.common.model.redshift.CrmTweetComments;
+import asia.wildfire.common.model.redshift.CrmTweets;
+import asia.wildfire.common.model.redshift.CrmUsers;
+import asia.wildfire.connection.EC2;
+import asia.wildfire.connection.Redshift;
+import asia.wildfire.helper.Period;
+import asia.wildfire.helper.Query;
+import asia.wildfire.utils.DateUtils;
+import asia.wildfire.utils.JsonParser;
+import asia.wildfire.utils.NumberUtils;
+import asia.wildfire.utils.StringUtils;
+
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+
+import org.nutz.dao.entity.annotation.Column;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
+/**
+ * Date: 14-3-3 Time: 上午10:58
+ */
+public class ActsocialWeiboDataServiceImpl implements ActsocialWeiboDataService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ActsocialWeiboDataServiceImpl.class);
+    public final static Integer MAX_DAYS = 90;
+    public final static Integer DEFAULT_VERSION = -1;
+    public final static Integer MAX_VERSION = 0;
+
+    static Map<String, String> genderConds = new HashMap<String, String>();
+    static Map<String, String> verifiedConds = new HashMap<String, String>();
+    static Map<String, String> verifiedConds2 = new HashMap<String, String>();
+    static Map<String, String> periodConds = new HashMap<String, String>();
+    static Map<String, String> followerCountConds = new HashMap<String, String>();
+    static Map<String, String> locationConds = new HashMap<String, String>();
+    static Pattern digitPattern = Pattern.compile("\\d+");
+    static SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+
+    static Query[] queries = new Query[]{
+            new Query(
+                    "overview",
+                    "cf.cuser_id as scope, count(follower_id) as count,(COALESCE(sum(mc),0,sum(mc))+COALESCE(sum(rc),0,sum(rc))+COALESCE(sum(cc),0,sum(cc))) AS influence",
+                    null, "cf.cuser_id,gender,verified_type,province"),
+            new Query("interactive", "count(follower_id) as count",
+                    "interactive > 0", null),
+            new Query("gender",
+                    "cf.cuser_id as scope,gender,count(follower_id) as count", null,
+                    "gender"),
+            new Query(
+                    "verified",
+                    "cf.cuser_id as scope,verified_type,count(follower_id) as count",
+                    null, "verified_type"),
+            new Query(
+                    "follower",
+                    "cf.cuser_id as scope,'0-500' as followers, count(follower_id) as count",
+                    "follower_count >= 0 and follower_count < 500", null),
+            new Query(
+                    "follower",
+                    "cf.cuser_id as scope,'500-1000' as followers, count(follower_id) as count",
+                    "follower_count >= 500 and follower_count < 1000", null),
+            new Query(
+                    "follower",
+                    "cf.cuser_id as scope,'1000-5000' as followers, count(follower_id) as count",
+                    "follower_count >= 1000 and follower_count < 5000", null),
+            new Query(
+                    "follower",
+                    "cf.cuser_id as scope,'5000+' as followers, count(follower_id) as count",
+                    "follower_count >= 5000", null),
+            new Query("location",
+                    "cf.cuser_id as scope, province, count(follower_id) as count",
+                    null, "province"),
+            new Query(
+                    "zombie",
+                    "cf.cuser_id as scope,'human' as type, count(follower_id) as count",
+                    "zombie_score >= 0 and zombie_score <= 0.5", null),
+            new Query(
+                    "zombie",
+                    "cf.cuser_id as scope,'suspect' as type, count(follower_id) as count",
+                    "zombie_score > 0.5 and zombie_score <= 1.5", null),
+            new Query(
+                    "zombie",
+                    "cf.cuser_id as scope,'zombie' as type, count(follower_id) as count",
+                    "zombie_score > 1.5", null)};
+
+    static {
+        genderConds.put("All", null);
+        genderConds.put("male", "m");
+        genderConds.put("female", "f");
+        genderConds.put("unknown", "unknown");
+
+        verifiedConds.put("All", null);
+        verifiedConds.put("master", "1,2,3,4,5,6,7,8");
+        verifiedConds.put("verified", "200,220");
+        verifiedConds.put("normal", "-1");
+
+        followerCountConds.put("All", null);
+        followerCountConds.put("0-500", "0-500");
+        followerCountConds.put("500-1000", "500-1000");
+        followerCountConds.put("1000-5000", "1000-5000");
+        followerCountConds.put("5000+", "5000+");
+
+        locationConds.put("All", null);
+        locationConds.put("Beijing", "北京");
+        locationConds.put("Tianjin", "天津");
+        locationConds.put("Hebei", "河北");
+        locationConds.put("Shanxi", "山西");
+        locationConds.put("NeiMongol", "内蒙古");
+        locationConds.put("Liaoning", "辽宁");
+        locationConds.put("Jilin", "吉林");
+        locationConds.put("Heilongjiang", "黑龙江");
+        locationConds.put("Shanghai", "上海");
+        locationConds.put("Jiangsu", "江苏");
+        locationConds.put("Zhejiang", "浙江");
+        locationConds.put("Anhui", "安徽");
+        locationConds.put("Fujian", "福建");
+        locationConds.put("Jiangxi", "江西");
+        locationConds.put("Shandong", "山东");
+        locationConds.put("Henan", "河南");
+        locationConds.put("Hubei", "湖北");
+        locationConds.put("Hunan", "湖南");
+        locationConds.put("Guangdong", "广东");
+        locationConds.put("Guangxi", "广西");
+        locationConds.put("Hainan", "海南");
+        locationConds.put("Chongqing", "重庆");
+        locationConds.put("Sichuan", "四川");
+        locationConds.put("Guizhou", "贵州");
+        locationConds.put("Yunnan", "云南");
+        locationConds.put("Xizang", "西藏");
+        locationConds.put("Shaanxi", "陕西");
+        locationConds.put("Gansu", "甘肃");
+        locationConds.put("Qinghai", "青海");
+        locationConds.put("Ningxia", "宁夏");
+        locationConds.put("Xinjiang", "新疆");
+        locationConds.put("Taiwan", "台湾");
+        locationConds.put("Xianggang", "香港");
+        locationConds.put("Aomen", "澳门");
+    }
+
+    @Override
+    public void calWeiboDashboard(String scope) throws Exception {
+        Module module = Module.loadByScope(scope);
+        Map<String, BasicDate> todoMap = module.getUTC8ToDoMap();
+        for (Map.Entry<String, BasicDate> entry : todoMap.entrySet()) {
+            String period = entry.getKey();
+            BasicDate basicDate = entry.getValue();
+            calWeiboDashboard(scope, period, basicDate.getStartTime(), basicDate.getEndTime());
+        }
+    }
+
+    @Override
+    public void calWeiboDashboard(String scope, String peroid, Calendar start, Calendar end) throws Exception {
+        long newFollowers = calWeiboNewFollower(scope, start, end, false);
+        long prevNewFollowers = calWeiboNewFollower(scope, start, end, true);
+        String newFollowersStr = "";
+        if (prevNewFollowers == 0) {
+            if (newFollowers == 0) {
+                newFollowersStr = "0";
+            } else if (newFollowers < 0) {
+                newFollowersStr = "-Infinity";
+            } else if (newFollowers > 0) {
+                newFollowersStr = "Infinity";
+            }
+        } else {
+            newFollowersStr = String.valueOf(NumberUtils.toDecimal2((double) (newFollowers - prevNewFollowers) / prevNewFollowers));
+        }
+        int newTweets = calWeiboTweets(scope, peroid, start, end, false);
+        int prevTweets = calWeiboTweets(scope, peroid, start, end, true);
+        String tweetsTrendStr = "";
+        if (prevTweets == 0) {
+            if (newTweets == 0) {
+                tweetsTrendStr = "0";
+            } else if (newTweets < 0) {
+                tweetsTrendStr = "-Infinity";
+            } else if (newTweets > 0) {
+                tweetsTrendStr = "Infinity";
+            }
+        } else {
+            tweetsTrendStr = String.valueOf(NumberUtils.toDecimal2((double) (newTweets - prevTweets) / prevTweets));
+        }
+
+        int newReTweets = calWeiboReTweets(scope, peroid, start, end, false);
+        int prevReTweets = calWeiboReTweets(scope, peroid, start, end, true);
+        String retweetTrendStr = "";
+        if (prevReTweets == 0) {
+            if (newReTweets == 0) {
+                retweetTrendStr = "0";
+            } else if (newReTweets < 0) {
+                retweetTrendStr = "-Infinity";
+            } else if (newReTweets > 0) {
+                retweetTrendStr = "Infinity";
+            }
+        } else {
+            retweetTrendStr = String.valueOf(NumberUtils.toDecimal2((double) (newReTweets - prevReTweets) / prevReTweets));
+        }
+
+        int newComments = calWeiboComments(scope, peroid, start, end, false);
+        int prevComments = calWeiboComments(scope, peroid, start, end, true);
+        String commentTrendStr = "";
+        if (prevComments == 0) {
+            if (newComments == 0) {
+                commentTrendStr = "0";
+            } else if (newComments < 0) {
+                commentTrendStr = "-Infinity";
+            } else if (newComments > 0) {
+                commentTrendStr = "Infinity";
+            }
+        } else {
+            commentTrendStr = String.valueOf(NumberUtils.toDecimal2((double) (newComments - prevComments) / prevComments));
+        }
+        WeiboDashboards dashboard = new WeiboDashboards(scope, peroid, Integer.parseInt(String.valueOf(newFollowers)), newFollowersStr, newTweets, tweetsTrendStr, newReTweets, retweetTrendStr, newComments, commentTrendStr, -1);
+        WeiboDashboardDao dashboardDao = new WeiboDashboardDao();
+        dashboardDao.insert(dashboard);
+    }
+
+    @Override
+    public void calWeiboAnalytics(String scope,Period period) throws Exception {
+        WeiboAnalyticDao analyticDao = new WeiboAnalyticDao();
+        List<WeiboAnalytics> analyticsList = Lists.newArrayList();
+        Map<String, Map<String, TweetCommentRepostDay>> tweetCommentRepostMap = getTweetCommentRepostDayWithDay2(scope,period);
+        int tweets = 0, repost = 0, comment = 0;
+        for(Map.Entry<String, Map<String, TweetCommentRepostDay>> entry : tweetCommentRepostMap.entrySet()) {
+            Map<String, TweetCommentRepostDay> single = entry.getValue();
+            for (Map.Entry<String, TweetCommentRepostDay> ee : single.entrySet()) {
+                tweets += ee.getValue().getTweets();
+                repost += ee.getValue().getReposts();
+                comment += ee.getValue().getComments();
+            }
+        }
+
+        Map<String, List<TweetCommentRepostDay>> tcrdResMap = Maps.newHashMap();
+        for (int i = 0; i < period.getInterval(); i++) {
+            Calendar startCal = DateUtils.getUTC8NDaysAgo(period.getEnd(), i);
+            String dateStr = new StringBuilder().append(startCal.get(Calendar.YEAR)).append("-").append(startCal.get(Calendar.MONTH) + 1).append("-").append(startCal.get(Calendar.DAY_OF_MONTH)).toString();
+            Map<String,TweetCommentRepostDay> singleMap = tweetCommentRepostMap.get(dateStr);
+            if (null == singleMap) {
+            	tcrdResMap.put(dateStr, new ArrayList<TweetCommentRepostDay>());
+            }else{
+            	tcrdResMap.put(dateStr, new ArrayList<TweetCommentRepostDay>(singleMap.values()));
+            }
+            
+        }
+        Map<String, FollowersInfoDay> followersInfoDayMap = getFollowersInfoWithDay(scope, period);
+        for (Map.Entry<String, List<TweetCommentRepostDay>> entry : tcrdResMap.entrySet()) {
+            String dateStr = entry.getKey();
+            List<TweetCommentRepostDay> singleList = entry.getValue();
+            if (null == singleList || singleList.size() <= 0) {
+                FollowersInfoDay infoDay = followersInfoDayMap.get(dateStr);
+                if (null == infoDay) {
+                    String[] splitStr = dateStr.split("-");
+                    WeiboAnalytics analytics = new WeiboAnalytics(scope, "", Integer.parseInt(splitStr[2]), Integer.parseInt(splitStr[1]), Integer.parseInt(splitStr[0]), 0, 0, 1, 0F, "weibo", new Date(),
+                            DateUtils.initCalendarWithYearMonthDay(Integer.parseInt(splitStr[0]), Integer.parseInt(splitStr[1]), Integer.parseInt(splitStr[2])).getTime(), "42", 0, 0, 0, 0L, 0, 0, 0, 0, 0L, -1);
+                    analytics.setNewFollowersWithoutSpammer(0L);
+                    analytics.setNewFollowersWithSpammer(0L);
+                    analytics.setDropouts(0L);
+                    analytics.setAttitudes(0);
+                    analyticsList.add(analytics);
+                } else {
+                    WeiboAnalytics analytics = new WeiboAnalytics(scope, "", infoDay.getDay(), infoDay.getMonth(), infoDay.getYear(), 0, 0, 1, 0F, "weibo", new Date(),
+                            DateUtils.initCalendarWithYearMonthDay(infoDay.getYear(), infoDay.getMonth(), infoDay.getDay()).getTime(), "42", 0, 0, 0, infoDay.getNetIncrement(), 0, 0, 0, 0, Long.parseLong(String.valueOf(infoDay.getFollowersCount())), -1);
+                    analytics.setNewFollowersWithoutSpammer(infoDay.getNewFollowersWithoutSpammer());
+                    analytics.setNewFollowersWithSpammer(infoDay.getNewFollowersWithSpammer());
+                    analytics.setDropouts(infoDay.getDropouts());
+                    analytics.setAttitudes(0);
+                    analyticsList.add(analytics);
+                }
+            } else {
+                for (TweetCommentRepostDay repostDay : singleList) {
+                    FollowersInfoDay infoDay = followersInfoDayMap.get(dateStr);
+                    if (null == infoDay) {
+                        String[] splitStr = dateStr.split("-");
+                        WeiboAnalytics analytics = new WeiboAnalytics(scope, repostDay.getTagsString(), repostDay.getDay(), repostDay.getMonth(), repostDay.getYear(), 0, 0, 1, 0F,
+                                "weibo", new Date(), DateUtils.initCalendarWithYearMonthDay(repostDay.getYear(), repostDay.getMonth(), repostDay.getDay()).getTime(), "42", repostDay.getTweets(),
+                                repostDay.getReposts(), repostDay.getComments(), 0L, 0, 0, 0, 0, 0L, -1);
+                        analytics.setNewFollowersWithoutSpammer(0L);
+                        analytics.setNewFollowersWithSpammer(0L);
+                        analytics.setDropouts(0L);
+                        analytics.setAttitudes(repostDay.getAttitudes());
+                        analyticsList.add(analytics);
+                    } else {
+                        WeiboAnalytics analytics = new WeiboAnalytics(scope, repostDay.getTagsString(), repostDay.getDay(), repostDay.getMonth(), repostDay.getYear(), 0, 0, 1, 0F,
+                                "weibo", new Date(), DateUtils.initCalendarWithYearMonthDay(repostDay.getYear(), repostDay.getMonth(), repostDay.getDay()).getTime(), "42", repostDay.getTweets(),
+                                repostDay.getReposts(), repostDay.getComments(), infoDay.getNetIncrement(), 0, 0, 0, 0, Long.parseLong(String.valueOf(infoDay.getFollowersCount())), -1);
+                        analytics.setNewFollowersWithoutSpammer(infoDay.getNewFollowersWithoutSpammer());
+                        analytics.setNewFollowersWithSpammer(infoDay.getNewFollowersWithSpammer());
+                        analytics.setDropouts(infoDay.getDropouts());
+                        analytics.setAttitudes(repostDay.getAttitudes());
+                        analyticsList.add(analytics);
+                    }
+                }
+            }
+        }
+        int tt = 0, rr = 0, cc = 0, ff = 0, fff = 0;
+        for (WeiboAnalytics wa : analyticsList) {
+            tt += wa.getTweets();
+            rr += wa.getReposts();
+            cc += wa.getComments();
+            ff += wa.getNewFollowersWithoutSpammer();
+            fff += wa.getNewFollowers();
+        }
+        System.out.println("period : " + period.getName() + "  tt : " + tt + " rr : " + rr + "  cc : " + cc + "  ff : " + ff + "  fff : " + fff);
+        analyticDao.batchInsert(analyticsList);
+    }
+
+    public void calTodayWeiboAnalytics(String scope, Calendar startCal, Calendar endCal) throws Exception {
+        String tweetSql = "select cuser_id, count(tweet_id),  DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day, DATE_PART('hour',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as hour from crm_tweet where cuser_id = '" + scope + "' and created_at >= " + startCal.getTime().getTime() + " and created_at < " + endCal.getTime().getTime() + " group by cuser_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('hour',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        String commentSql = "select cuser_id, count(comment_id) as comments_count, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day, DATE_PART('hour',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as hour from crm_comment where cuser_id = '" + scope + "' and created_at >= " + startCal.getTime().getTime() + " and created_at < " + endCal.getTime().getTime() + " group by cuser_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('hour',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        String retweetSql = "select cuser_id, count(retweet_id) as retweet_count, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day, DATE_PART('hour',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as hour from crm_retweets where cuser_id = '" + scope + "' and created_at >= " + startCal.getTime().getTime() + " and created_at < " + endCal.getTime().getTime() + " group by cuser_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('hour',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+
+        List<TweetCommentRepostDay> tweetList = getTweetCommentRepostDayAndHour(scope, tweetSql, startCal, endCal, "tweet");
+        List<TweetCommentRepostDay> commentList = getTweetCommentRepostDayAndHour(scope, commentSql, startCal, endCal, "comment");
+        List<TweetCommentRepostDay> retweetList = getTweetCommentRepostDayAndHour(scope, retweetSql, startCal, endCal, "retweet");
+        Integer year = startCal.get(Calendar.YEAR), month = startCal.get(Calendar.MONTH) + 1, day = startCal.get(Calendar.DAY_OF_MONTH);
+        WeiboAnalyticDao analyticDao = new WeiboAnalyticDao();
+        List<WeiboAnalytics> analyticsList = Lists.newArrayList();
+        for (int i = 0; i <= 23; i++) {
+            int tweetNum = 0, commentNum = 0, retweetNum = 0;
+            Calendar nowCal = Calendar.getInstance();
+            nowCal.set(year, month - 1, day, i, 0);
+            for (TweetCommentRepostDay tcrd : tweetList) {
+                if (tcrd.getHour() == i) {
+                    tweetNum = tcrd.getTweets();
+                }
+            }
+            for (TweetCommentRepostDay tcrd : commentList) {
+                if (tcrd.getHour() == i) {
+                    commentNum = tcrd.getComments();
+                }
+            }
+            for (TweetCommentRepostDay tcrd : retweetList) {
+                if (tcrd.getHour() == i) {
+                    retweetNum = tcrd.getReposts();
+                }
+            }
+            WeiboAnalytics analytics = new WeiboAnalytics(scope, "", day, month, year, 0, 0, 0, 0f, "weibo", new Date(), nowCal.getTime(), "42", tweetNum, retweetNum, commentNum, 0L, 0, 0, 0, 0, 0L, -1);
+            analyticsList.add(analytics);
+        }
+        analyticDao.batchInsert(analyticsList);
+    }
+
+    @Override
+    public void calWeiboTopic(String scope) throws Exception {
+        Module module = Module.loadByScope(scope);
+        Map<String, BasicDate> todoMap = module.getUTC8ToDoMap();
+        List<WeiboTopics> resultList = Lists.newArrayList();
+        WeiboTopicDao topicDao = new WeiboTopicDao();
+        for (Map.Entry<String, BasicDate> entry : todoMap.entrySet()) {
+            String period = entry.getKey();
+            BasicDate basicDate = entry.getValue();
+            List<WeiboTopics> weiboTopicsList = calWeiboTopic(scope, period, basicDate.getStartTime(), basicDate.getEndTime());
+            resultList.addAll(weiboTopicsList);
+        }
+        topicDao.batchInsert(resultList);
+    }
+
+    @Override
+    public void calWeiboTopPost(String scope, Calendar startCal, Calendar endCal) throws Exception {
+        Calendar middleNight = DateUtils.getMidNight();
+        if (null == startCal || null == endCal) {
+            startCal = DateUtils.getNDaysAgo(middleNight, MAX_DAYS);
+            endCal = DateUtils.getNDaysAgo(middleNight, 0);
+        }
+        String retweetTopSql = "select ct.cuser_id, ct.tweet_id, ct.text, 'retweet', a.year, a.month, a.day, a.retweets_count from crm_tweet ct right join (select cuser_id, tweet_id, count(retweet_id) as retweets_count, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day from crm_retweets where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) order by count(retweet_id) desc) a on ct.tweet_id = a.tweet_id and ct.cuser_id = a.cuser_id;";
+        String commentTopSql = "select ct.cuser_id, ct.tweet_id, ct.text, 'comment', a.year, a.month, a.day, a.comments_count from crm_tweet ct right join (select cuser_id, tweet_id, count(comment_id) as comments_count, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day from crm_comment where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) order by count(comment_id) desc) a on ct.tweet_id = a.tweet_id and ct.cuser_id = a.cuser_id;";
+
+        Map<String, List<CommentRetweetInfo>> topRetweetMap = queryCommentOrRetweetTopPostWithType(scope, retweetTopSql, "retweet", startCal, endCal);
+        Map<String, List<CommentRetweetInfo>> topCommentMap = queryCommentOrRetweetTopPostWithType(scope, commentTopSql, "comment", startCal, endCal);
+
+        String seperator = "||||||";
+        List<WeiboTopPost> topPostList = Lists.newArrayList();
+
+        for (Map.Entry<String, List<CommentRetweetInfo>> entry : topRetweetMap.entrySet()) {
+            String key = entry.getKey();
+            String repostResult = "";
+            List<CommentRetweetInfo> value = entry.getValue();
+            int repostNumber = 0;
+            for (CommentRetweetInfo postTemp : value) {
+                repostNumber = repostNumber + postTemp.getRepostsCount();
+            }
+            Collections.sort(value, new Comparator<CommentRetweetInfo>() {
+                @Override
+                public int compare(CommentRetweetInfo ti1, CommentRetweetInfo ti2) {
+                    if (ti1.getRepostsCount() > ti2.getRepostsCount()) {
+                        return -1;
+                    } else if (ti1.getRepostsCount() < ti2.getRepostsCount()) {
+                        return 1;
+                    } else {
+                        return 0;
+                    }
+                }
+            });
+            for (CommentRetweetInfo postTemp : value) {
+                Map<String, Object> repostMap = Maps.newHashMap();
+                Double percent = NumberUtils.toDecimal4((double) postTemp.getRepostsCount() / repostNumber);
+                String percentage = NumberUtils.toDecimal1(percent * 100) + "%";
+//                repostMap.put("title", postTemp.getText());  StringUtils.getSubString(postTemp.getText(), 0, 50)
+                repostMap.put("title", StringUtils.getSubString(postTemp.getText(), 0, 50));
+                repostMap.put("percent", percentage);
+                repostMap.put("threadId", postTemp.getTweetId());
+                repostMap.put("posts", postTemp.getRepostsCount());
+                repostMap.put("media", "Weibo");
+                repostResult += JsonParser.map2Json(repostMap) + seperator;
+            }
+            WeiboTopPost repostTopPost = new WeiboTopPost(scope, "repost", DateUtils.dateStrToDate(key), repostResult, -1);
+            topPostList.add(repostTopPost);
+        }
+
+        for (Map.Entry<String, List<CommentRetweetInfo>> entry : topCommentMap.entrySet()) {
+            String key = entry.getKey();
+            String commentResult = "";
+            List<CommentRetweetInfo> value = entry.getValue();
+            int commentNumber = 0;
+            for (CommentRetweetInfo postTemp : value) {
+                commentNumber = commentNumber + postTemp.getCommentsCount();
+            }
+            Collections.sort(value, new Comparator<CommentRetweetInfo>() {
+                @Override
+                public int compare(CommentRetweetInfo ti1, CommentRetweetInfo ti2) {
+                    if (ti1.getCommentsCount() > ti2.getCommentsCount()) {
+                        return -1;
+                    } else if (ti1.getCommentsCount() < ti2.getCommentsCount()) {
+                        return 1;
+                    } else {
+                        return 0;
+                    }
+                }
+            });
+            for (CommentRetweetInfo postTemp : value) {
+                Map<String, Object> repostMap = Maps.newHashMap();
+                Double percent = NumberUtils.toDecimal4((double) postTemp.getCommentsCount() / commentNumber);
+                String percentage = NumberUtils.toDecimal1(percent * 100) + "%";
+//                repostMap.put("title", postTemp.getText());
+                repostMap.put("title", StringUtils.getSubString(postTemp.getText(), 0, 50));
+                repostMap.put("percent", percentage);
+                repostMap.put("threadId", postTemp.getTweetId());
+                repostMap.put("posts", postTemp.getCommentsCount());
+                repostMap.put("media", "Weibo");
+                commentResult += JsonParser.map2Json(repostMap) + seperator;
+            }
+            WeiboTopPost commetTopPost = new WeiboTopPost(scope, "comment", DateUtils.dateStrToDate(key), commentResult, -1);
+            topPostList.add(commetTopPost);
+        }
+
+        WeiboTopPostDao topPostDao = new WeiboTopPostDao();
+        topPostDao.batchInsert(topPostList);
+    }
+
+    @Override
+    public void calWeiboSourceDistribution(String scope, Calendar startCal, Calendar endCal) throws Exception {
+        String sql = "select * from (select res_tab.cuser_id, res_tab.source, res_tab.positive_tags_string, res_tab.year, res_tab.month, res_tab.day, sum(comments_count) as comments_count from (select cc.*, ct.positive_tags_string from (select cuser_id, tweet_id, source, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day, count(*) as comments_count from crm_comment where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, source, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'))) cc left join crm_tweet ct on cc.tweet_id = ct.tweet_id) res_tab group by res_tab.cuser_id, res_tab.source, res_tab.positive_tags_string, res_tab.year, res_tab.month, res_tab.day) left_tab full join (select res_tab.cuser_id, res_tab.source, res_tab.positive_tags_string, res_tab.year, res_tab.month, res_tab.day, sum(retweets_count) as retweets_count from (select cc.*, ct.positive_tags_string from (select cuser_id, tweet_id, source, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day, count(*) as retweets_count from crm_retweets where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, source, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'))) cc left join crm_tweet ct on cc.tweet_id = ct.tweet_id) res_tab group by res_tab.cuser_id, res_tab.source, res_tab.positive_tags_string, res_tab.year, res_tab.month, res_tab.day) right_tab on left_tab.source = right_tab.source and left_tab.positive_tags_string = right_tab.positive_tags_string and left_tab.year = right_tab.year and left_tab.month = right_tab.month and left_tab.day = right_tab.day;";
+        Map<String, List<SourceDistribuInfo>> sourcDisMap = getSourceDistribuInfoWithSqlAndType(scope, sql, startCal, endCal);
+
+        WeiboSourceDistributionDao distributionDao = new WeiboSourceDistributionDao();
+        List<WeiboSourceDistribution> sourceDistributionList = Lists.newArrayList();
+        for (Map.Entry<String, List<SourceDistribuInfo>> entry : sourcDisMap.entrySet()) {
+            Date date = DateUtils.dateStrToDate(entry.getKey());
+            for (SourceDistribuInfo sdt : entry.getValue()) {
+                WeiboSourceDistribution sourceDistribution = new WeiboSourceDistribution(scope, sdt.getPositiveTagsString(), sdt.getSource(), date, sdt.getDisCount(), -1);
+                sourceDistributionList.add(sourceDistribution);
+            }
+        }
+        distributionDao.batchInsert(sourceDistributionList);
+    }
+
+    @Override
+    public void calWeiboExposure(String scope, Calendar startCal, Calendar endCal) throws Exception {
+    	LOGGER.info("cal weibo exposure ["+scope+"] "+startCal.getTimeInMillis() + " to "+ endCal.getTimeInMillis());
+        Calendar middleNight = DateUtils.getMidNight();
+        if (null == startCal || null == endCal) {
+            startCal = DateUtils.getNDaysAgo(middleNight, MAX_DAYS);
+            endCal = DateUtils.getNDaysAgo(middleNight, 0);
+        }
+        Map<String,Map<String,WeiboExposure>> map = new HashMap<String, Map<String,WeiboExposure>>();
+//        List<String> dateList = Lists.newArrayList();
+        int length = (int) ((endCal.getTime().getTime() - startCal.getTime().getTime()) / (24 * 60 * 60 * 1000));
+        for(int i=0; i<length; i++) {
+            Calendar thisSingleCal = DateUtils.getNDaysLater(startCal, i);
+            map.put(new StringBuilder().append(thisSingleCal.get(Calendar.YEAR)).append("-").append(thisSingleCal.get(Calendar.MONTH) + 1).append("-").append(thisSingleCal.get(Calendar.DAY_OF_MONTH)).toString(),new HashMap<String,WeiboExposure>());
+//            dateList.add(new StringBuilder().append(thisSingleCal.get(Calendar.YEAR)).append("-").append(thisSingleCal.get(Calendar.MONTH) + 1).append("-").append(thisSingleCal.get(Calendar.DAY_OF_MONTH)).toString());
+
+        }
+        LOGGER.info(map.keySet().toString());
+        String sql = "select cr.cuser_id, ct.tags_string, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + cr.created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + cr.created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + cr.created_at * INTERVAL '0.001 s')) as day, sum(COALESCE(cr.followers_count, 0, cr.followers_count)) as exposure from crm_retweets cr left join crm_tweet ct on cr.tweet_id = ct.tweet_id where cr.cuser_id = ? and cr.created_at >= ? and cr.created_at < ? group by cr.cuser_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + cr.created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + cr.created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + cr.created_at * INTERVAL '0.001 s')),ct.tweet_id,ct.tags_string;";
+//        String sql = "select cuser_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day, sum(COALESCE(followers_count, 0, followers_count)) as exposure from crm_retweets where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        List<WeiboExposure> exposureList = Lists.newArrayList();
+        WeiboExposureDao exposureDao = new WeiboExposureDao();
+        CrmFollowerTrackerDao trackerDao = new CrmFollowerTrackerDao();
+        CrmTweetsDao tweetDao = new CrmTweetsDao();
+        try (Connection connection = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = connection.prepareStatement(sql);) {
+            pstmt.setString(1, scope);
+            pstmt.setLong(2, startCal.getTime().getTime());
+            pstmt.setLong(3, endCal.getTime().getTime());
+            try (ResultSet rss = pstmt.executeQuery()) {
+                while (rss.next()) {
+                    String dateStr = new StringBuilder().append(rss.getInt("year")).append("-").append(rss.getInt("month")).append("-").append(rss.getInt("day")).toString();
+                    Calendar thisCal = DateUtils.getNDaysLater(DateUtils.timestamp2GMTCalendar(dateStr, "GMT+00:00"), 1);
+                    List<CrmFollowerTracker> trackerList = trackerDao.queryBySql("cuser_id='" + scope + "' and date<" + thisCal.getTime().getTime() + " order by date desc limit 1");
+                    long followersCount = trackerList.get(0).getFollowersCount();
+//                    long tc = tweetDao.countByCond(new String[]{"cuser_id","created_at","created_at"}, new String[]{"=","<",">="}, new Object[]{scope,thisCal.getTimeInMillis(),thisCal.getTimeInMillis()-24*60*60*1000});
+//                    if (trackerList.size() > 0) {
+//                        followersCount = trackerList.get(0).getFollowersCount()*tc;
+//                    }
+                    String tagString = rss.getString("tags_string");
+                    if(tagString == null){
+                    	tagString = "";
+                    }
+                    String[] tags = tagString.split("[|]");
+                    for (String tag : tags) {
+						if(tags != null && !"".equals(tag)){
+							if(map.get(dateStr).get(tag) == null){
+								WeiboExposure exposure = new WeiboExposure(scope, DateUtils.dateStrToDate(dateStr), rss.getInt("year"), rss.getInt("month"), rss.getInt("day"), rss.getLong("exposure") + followersCount, -1);
+		                    	exposure.setTopic(tag);
+		                    	map.get(dateStr).put(tag, exposure);
+							}else{
+								WeiboExposure exposure = map.get(dateStr).get(tag);
+								exposure.setExposure(exposure.getExposure() + rss.getLong("exposure") + followersCount); 
+								map.get(dateStr).put(tag,exposure);
+							}
+						}
+					}
+                    if(map.get(dateStr).get("all") == null){
+                    	WeiboExposure allExposure = new WeiboExposure(scope, DateUtils.dateStrToDate(dateStr), rss.getInt("year"), rss.getInt("month"), rss.getInt("day"), rss.getLong("exposure"), -1);
+                    	allExposure.setTopic("all");
+                    	map.get(dateStr).put("all", allExposure);
+                    }else{
+						WeiboExposure allExposure = map.get(dateStr).get("all");
+						allExposure.setExposure(allExposure.getExposure() + rss.getLong("exposure"));
+						map.get(dateStr).put("all", allExposure);
+					}
+//                    WeiboExposure exposure = new WeiboExposure(scope, DateUtils.dateStrToDate(dateStr), rss.getInt("year"), rss.getInt("month"), rss.getInt("day"), rss.getLong("exposure") + followersCount, -1);
+//                    exposureList.add(exposure);
+//                    dateList.remove(dateStr);
+                }
+            } catch (Exception e) {
+            	LOGGER.error(e.getMessage());
+                e.printStackTrace();
+            }
+            for (Entry<String, Map<String, WeiboExposure>> entry : map.entrySet()) {
+            	String str = entry.getKey();
+				String[] strSplit = str.split("-");
+                Calendar strCal = DateUtils.timestamp2GMTCalendar(str, "GMT+00:00");
+                Calendar thisCal = DateUtils.getNDaysLater(strCal, 1);
+				if(entry.getValue().isEmpty()){
+	                List<CrmFollowerTracker> trackerList = trackerDao.queryBySql("cuser_id='" + scope + "' and date<" + thisCal.getTime().getTime() + " order by date desc limit 1");
+	                long followersCount = 0L;
+	                long tc = tweetDao.countByCond(new String[]{"cuser_id","created_at","created_at"}, new String[]{"=","<",">="}, new Object[]{scope,thisCal.getTimeInMillis(),thisCal.getTimeInMillis()-24*60*60*1000});
+	                if (trackerList.size() > 0) {
+	                	followersCount = trackerList.get(0).getFollowersCount()*tc;
+	                }
+	                WeiboExposure exposure = new WeiboExposure(scope, DateUtils.dateStrToDate(str), Integer.parseInt(strSplit[0]), Integer.parseInt(strSplit[1]), Integer.parseInt(strSplit[2]), followersCount, -1);
+	                exposure.setTopic("all");
+	                exposureList.add(exposure);
+				}else{
+					for (Entry<String, WeiboExposure> entry2 : entry.getValue().entrySet()) {
+						if("all".equals(entry2.getKey())){
+							long followersCount = 0L;
+							List<CrmFollowerTracker> trackerList = trackerDao.queryBySql("cuser_id='" + scope + "' and date<" + thisCal.getTime().getTime() + " order by date desc limit 1");
+			                long tc = tweetDao.countByCond(new String[]{"cuser_id","created_at","created_at"}, new String[]{"=","<",">="}, new Object[]{scope,thisCal.getTimeInMillis(),thisCal.getTimeInMillis()-24*60*60*1000});
+			                if (trackerList.size() > 0) {
+			                	followersCount = trackerList.get(0).getFollowersCount()*tc;
+			                }
+							entry2.getValue().setExposure(entry2.getValue().getExposure() + followersCount);
+						}
+						exposureList.add(entry2.getValue());
+					}
+				}
+			}
+//            for(String str : dateList) {
+//                String[] strSplit = str.split("-");
+//                Calendar strCal = DateUtils.timestamp2GMTCalendar(str, "GMT+00:00");
+//                Calendar thisCal = DateUtils.getNDaysLater(strCal, 1);
+//                List<CrmFollowerTracker> trackerList = trackerDao.queryBySql("cuser_id='" + scope + "' and date<" + thisCal.getTime().getTime() + " order by date desc limit 1");
+//                long followersCount = 0L;
+//                if (trackerList.size() > 0) {
+//                    followersCount = trackerList.get(0).getFollowersCount();
+//                }
+//                WeiboExposure exposure = new WeiboExposure(scope, DateUtils.dateStrToDate(str), Integer.parseInt(strSplit[0]), Integer.parseInt(strSplit[1]), Integer.parseInt(strSplit[2]), followersCount, -1);
+//                exposure.setTopic("all");
+//                exposureList.add(exposure);
+//            }
+            exposureDao.batchInsert(exposureList);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public List<WeiboTopics> calWeiboTopic(String scope, String period, Calendar startCal, Calendar endCal) {
+        List<WeiboTopics> weiboTopicsList = new ArrayList<WeiboTopics>();
+        CrmTweetsDao crmTweetsDao = new CrmTweetsDao();
+        String sql = "select positive_tags_string, (sum(comments_count) + sum(reposts_count)) as mention from crm_tweet where cuser_id =@scope and created_at >=@startTime and created_at <@endTime group by positive_tags_string";
+        Map<String, Object> parentParams = new HashMap<String, Object>();
+        parentParams.put("scope", scope);
+        parentParams.put("startTime", startCal.getTimeInMillis());
+        parentParams.put("endTime", endCal.getTimeInMillis());
+        List<Map> currentParentPostsCountList = crmTweetsDao.executeQueryWithKeyValue(sql, parentParams, "positive_tags_string", "mention");
+        for (Iterator<Map> iterator = currentParentPostsCountList.iterator(); iterator.hasNext(); ) {
+            Map map = iterator.next();
+            for (Object key : map.keySet()) {
+                System.out.println((String) key);
+                WeiboTopics weiboTopics = new WeiboTopics(scope, (String) key, period, new Long((long) map.get(key)).intValue(), new Date(), -1);
+                weiboTopicsList.add(weiboTopics);
+            }
+        }
+        return weiboTopicsList;
+    }
+
+    public List<CrmFollowerTracker> quertFollowerTrackerByCT(CrmFollowerTrackerDao crmFollowerTrackerDao, String scope, long startTime, long endTime) {
+        return crmFollowerTrackerDao.queryBySql("cuser_id='" + scope + "' and date>=" + startTime + " and date<=" + endTime + " order by date asc");
+    }
+
+    public Map<String, Long> calWeiboNewFollowers(String scope, String period, long start, long end) {
+        final int oneDay = 86400000;
+        CrmFollowerTrackerDao crmFollowerTrackerDao = new CrmFollowerTrackerDao();
+        Map<String, Long> result = Maps.newHashMap();
+        List<CrmFollowerTracker> firstDay = null;
+        List<CrmFollowerTracker> lastDay = null;
+        if (period == "1") {
+            firstDay = quertFollowerTrackerByCT(crmFollowerTrackerDao, scope, start - oneDay + 1, start);
+            lastDay = quertFollowerTrackerByCT(crmFollowerTrackerDao, scope, end - oneDay + 1, end);
+            if (firstDay == null || lastDay == null) {
+                firstDay = crmFollowerTrackerDao.queryBySql("date < " + end + " order by date desc limit 2");
+                long sum = firstDay.get(firstDay.size() - 1).getFollowersCount() - firstDay.get(0).getFollowersCount();
+                result.put(period, sum);
+            } else {
+                long sum = lastDay.get(lastDay.size() - 1).getFollowersCount() - firstDay.get(lastDay.size() - 1).getFollowersCount();
+                result.put(period, sum);
+            }
+        } else {
+            firstDay = quertFollowerTrackerByCT(crmFollowerTrackerDao, scope, start, start + oneDay - 1);
+            lastDay = quertFollowerTrackerByCT(crmFollowerTrackerDao, scope, end - oneDay + 1, end);
+            if (firstDay == null) {
+                firstDay = crmFollowerTrackerDao.queryBySql("date < " + start + " order by date desc limit 1");
+            } else if (lastDay == null) {
+                lastDay = crmFollowerTrackerDao.queryBySql("date < " + end + " order by date desc limit 1");
+            }
+            long sum = lastDay.get(firstDay.size() - 1).getFollowersCount() - firstDay.get(firstDay.size() - 1).getFollowersCount();
+            result.put(period, sum);
+        }
+        return result;
+    }
+
+    public Map<String, Map<String,TweetCommentRepostDay>> getTweetCommentRepostDayWithDay2(String scope,Period period) {
+        Calendar startCal = period.getStart();
+        Calendar endCal = period.getEnd();
+        Map<String, Map<String,TweetCommentRepostDay>> resultMap = Maps.newHashMap();
+        String tweetSql = "select cuser_id, tweet_id, tags_string, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day,sum(attitudes_count) as attitudes_count from crm_tweet where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, tags_string, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        String commentSql = "select cuser_id, tweet_id, count(distinct(CONCAT(tweet_id, comment_id))) as comments_count, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day from crm_comment where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        String retweetSql = "select cuser_id, tweet_id, count(distinct(CONCAT(tweet_id, retweet_id))) as retweet_count, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day from crm_retweets where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        Map<String,TweetCommentRepostDay> tweetMap = getTweetDay2(scope, tweetSql, startCal, endCal, "tweet");
+        Map<String, Map<String,TweetCommentRepostDay>> commentMap = getCommentRepostDay2(scope, commentSql, startCal, endCal, "comment");
+        Map<String, Map<String,TweetCommentRepostDay>> retweetMap = getCommentRepostDay2(scope, retweetSql, startCal, endCal, "retweet");
+
+        Map<String,String> tagsMap = new HashMap<String,String>();
+        for (TweetCommentRepostDay tweet : tweetMap.values()) {
+        	String dateStr = StringUtils.ymd2String(tweet.getYear(), tweet.getMonth(), tweet.getDay());
+        	if(resultMap.get(dateStr)==null){
+        		resultMap.put(dateStr, new HashMap<String,TweetCommentRepostDay>());
+        	}
+        	resultMap.get(dateStr).put(tweet.getTweetId(),tweet);
+        	tagsMap.put(tweet.getTweetId(),tweet.getTagsString());
+		}
+        for (int i = 0; i < period.getInterval(); i++) {
+            Calendar thisCal = DateUtils.getNDaysAgo(period.getEnd(), i);
+            String dateStr = new StringBuilder().append(thisCal.get(Calendar.YEAR)).append("-").append(thisCal.get(Calendar.MONTH) + 1).append("-").append(thisCal.get(Calendar.DAY_OF_MONTH)).toString();
+            Map<String,TweetCommentRepostDay> commentSingleMap = commentMap.get(dateStr);
+            Map<String,TweetCommentRepostDay> retweetSingleMap = retweetMap.get(dateStr);
+            
+            if(commentSingleMap!=null || retweetSingleMap!=null){
+            	if(resultMap.get(dateStr)==null){
+            		resultMap.put(dateStr, new HashMap<String,TweetCommentRepostDay>());
+            	}
+            	if(commentSingleMap!=null){
+            		for (Entry<String, TweetCommentRepostDay> cEntry : commentSingleMap.entrySet()) {
+						String tweetId = cEntry.getKey();
+						TweetCommentRepostDay tc = cEntry.getValue();
+						TweetCommentRepostDay existed = resultMap.get(dateStr).get(tweetId);
+						if(existed==null){
+							String tagString = "";
+							if(tagsMap.get(tweetId)!=null){
+								tagString = tagsMap.get(tweetId);
+								if(tagString == null){
+									tagString = "";
+								}
+							}
+							resultMap.get(dateStr).put(tc.getTweetId(),new TweetCommentRepostDay(scope, tagString, 0, 0, 1, tc.getYear(), tc.getMonth(), tc.getDay(), 0, tc.getComments(), tc.getReposts(), tc.getTweetId()));
+						}else{
+							existed.setComments(tc.getComments());
+						}
+					}
+            	}
+            	if(retweetSingleMap!=null){
+            		for (Entry<String, TweetCommentRepostDay> rEntry : retweetSingleMap.entrySet()) {
+						String tweetId = rEntry.getKey();
+						TweetCommentRepostDay tr = rEntry.getValue();
+						TweetCommentRepostDay existed = resultMap.get(dateStr).get(tweetId);
+						if(existed==null){
+							String tagString = "";
+							if(tagsMap.get(tweetId)!=null){
+								tagString = tagsMap.get(tweetId);
+								if(tagString == null){
+									tagString = "";
+								}
+							}
+							resultMap.get(dateStr).put(tr.getTweetId(),new TweetCommentRepostDay(scope, tagString, 0, 0, 1, tr.getYear(), tr.getMonth(), tr.getDay(), 0, tr.getComments(), tr.getReposts(), tr.getTweetId()));
+						}else{
+							existed.setReposts(tr.getReposts());
+						}
+					}
+            	}
+            }
+        }
+        return resultMap;
+    }
+    
+    public Map<String, List<TweetCommentRepostDay>> getTweetCommentRepostDayWithDay(String scope,Period period) {
+        Calendar middleNight = DateUtils.getMidNight();
+        Calendar startCal = period.getStart();
+        Calendar endCal = period.getEnd();
+        Map<String, List<TweetCommentRepostDay>> resultMap = Maps.newHashMap();
+        String tweetSql = "select cuser_id, tweet_id, tags_string,sum(attitudes_count) as attitudes_count, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day from crm_tweet where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, tags_string, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        String commentSql = "select cuser_id, tweet_id, count(comment_id) as comments_count, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day from crm_comment where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        String retweetSql = "select cuser_id, tweet_id, count(retweet_id) as retweet_count, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day from crm_retweets where cuser_id = ? and created_at >= ? and created_at < ? group by cuser_id, tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        Map<String, List<TweetCommentRepostDay>> tweetMap = getTweetCommentRepostDay(scope, tweetSql, startCal, endCal, "tweet");
+        Map<String, List<TweetCommentRepostDay>> commentMap = getTweetCommentRepostDay(scope, commentSql, startCal, endCal, "comment");
+        Map<String, List<TweetCommentRepostDay>> retweetMap = getTweetCommentRepostDay(scope, retweetSql, startCal, endCal, "retweet");
+
+        Map<String, List<TweetCommentRepostDay>> middleMap = Maps.newHashMap();
+
+        for (int i = 0; i < period.getInterval(); i++) {
+            Calendar thisCal = DateUtils.getNDaysAgo(period.getEnd(), i+1);
+            String dateStr = new StringBuilder().append(thisCal.get(Calendar.YEAR)).append("-").append(thisCal.get(Calendar.MONTH) + 1).append("-").append(thisCal.get(Calendar.DAY_OF_MONTH)).toString();
+            List<TweetCommentRepostDay> commentSingleList = commentMap.get(dateStr);
+            List<TweetCommentRepostDay> middleResList = Lists.newArrayList();
+
+            if (null != commentSingleList && commentSingleList.size() >= 0) {
+                List<TweetCommentRepostDay> tweetSingleList = tweetMap.get(dateStr);
+                if (null == tweetSingleList) {
+                    tweetSingleList = Lists.newArrayList();
+                }
+                for (TweetCommentRepostDay tc : commentSingleList) {
+                    TweetCommentRepostDay tcrd = null;
+                    TweetCommentRepostDay existTcrd = null;
+                    for (Iterator<TweetCommentRepostDay> ii = tweetSingleList.iterator(); ii.hasNext(); ) {
+                        TweetCommentRepostDay tt = ii.next();
+                        System.out.println("&&&&&&&&&&&&&&&"+tt.getAttitudes());
+                        if (tt.getTweetId().equals(tc.getTweetId())) {
+                            existTcrd = tt;
+                            ii.remove();
+                        }
+                    }
+                    if (null != existTcrd) {
+                        //有c 有 t
+                        tcrd = new TweetCommentRepostDay(scope, existTcrd.getTagsString(), 0, 0, 1, tc.getYear(), tc.getMonth(), tc.getDay(), 1, tc.getComments(), 0, tc.getTweetId());
+                        tcrd.setAttitudes(existTcrd.getAttitudes());
+                        System.out.println("*******************"+existTcrd.getAttitudes());
+                    } else {
+                        //有c 无 t
+                        tcrd = new TweetCommentRepostDay(scope, "", 0, 0, 1, tc.getYear(), tc.getMonth(), tc.getDay(), 0, tc.getComments(), 0, tc.getTweetId());
+                    }
+                    middleResList.add(tcrd);
+                }
+                for (TweetCommentRepostDay tt : tweetSingleList) {
+                    TweetCommentRepostDay tx = new TweetCommentRepostDay(scope, tt.getTagsString(), 0, 0, 1, tt.getYear(), tt.getMonth(), tt.getDay(), 1, 0, 0, tt.getTweetId());
+                    middleResList.add(tx);
+                }
+            } else {
+                List<TweetCommentRepostDay> tweetSingleList = tweetMap.get(dateStr);
+                if (null == tweetSingleList) {
+                    tweetSingleList = Lists.newArrayList();
+                }
+                if (tweetSingleList.size() > 0) {
+                    for (TweetCommentRepostDay tt : tweetSingleList) {
+                        TweetCommentRepostDay tx = new TweetCommentRepostDay(scope, tt.getTagsString(), 0, 0, 1, tt.getYear(), tt.getMonth(), tt.getDay(), 1, 0, 0, tt.getTweetId());
+                        tx.setAttitudes(tt.getAttitudes());
+                        System.out.println("*******************"+tt.getAttitudes());
+                        middleResList.add(tx);
+                    }
+                } else {
+                    TweetCommentRepostDay tx = new TweetCommentRepostDay(scope, "", 0, 0, 0, thisCal.get(Calendar.YEAR), thisCal.get(Calendar.MONTH) + 1, thisCal.get(Calendar.DAY_OF_MONTH), 0, 0, 0, "");
+                    tx.setAttitudes(0);
+                    middleResList.add(tx);
+                }
+            }
+            middleMap.put(dateStr, middleResList);
+        }
+        //retweet
+        for (int i = 0; i < period.getInterval(); i++) {
+            Calendar thisCal = DateUtils.getNDaysAgo(period.getEnd(), i+1);
+            String dateStr = new StringBuilder().append(thisCal.get(Calendar.YEAR)).append("-").append(thisCal.get(Calendar.MONTH) + 1).append("-").append(thisCal.get(Calendar.DAY_OF_MONTH)).toString();
+
+            List<TweetCommentRepostDay> retweetSingleList = retweetMap.get(dateStr);
+            List<TweetCommentRepostDay> middleResList = Lists.newArrayList();
+            if (null != retweetSingleList && retweetSingleList.size() >= 0) {
+                List<TweetCommentRepostDay> tweetSingleList = middleMap.get(dateStr);
+                if (null == tweetSingleList) {
+                    tweetSingleList = Lists.newArrayList();
+                }
+                for (TweetCommentRepostDay tr : retweetSingleList) {
+                    TweetCommentRepostDay tcrd = null;
+                    TweetCommentRepostDay existTcrd = null;
+                    for (Iterator<TweetCommentRepostDay> ii = tweetSingleList.iterator(); ii.hasNext(); ) {
+                        TweetCommentRepostDay tt = ii.next();
+                        System.out.println("&&&&&&&&&&&&&&&"+tt.getAttitudes());
+                        if (tt.getTweetId().equals(tr.getTweetId())) {
+                            existTcrd = tt;
+                            ii.remove();
+                        }
+                    }
+                    if (null != existTcrd) {
+                        //有c 有 t
+                        tcrd = new TweetCommentRepostDay(scope, existTcrd.getTagsString(), 0, 0, 1, tr.getYear(), tr.getMonth(), tr.getDay(), existTcrd.getTweets(), existTcrd.getComments(), tr.getReposts(), tr.getTweetId());
+                        tcrd.setAttitudes(existTcrd.getAttitudes());
+                        System.out.println("*******************"+existTcrd.getAttitudes());
+                    } else {
+                        //有c 无 t
+                        tcrd = new TweetCommentRepostDay(scope, "", 0, 0, 1, tr.getYear(), tr.getMonth(), tr.getDay(), 0, tr.getComments(), tr.getReposts(), tr.getTweetId());
+                    }
+                    middleResList.add(tcrd);
+                }
+                for (TweetCommentRepostDay tt : tweetSingleList) {
+                    TweetCommentRepostDay tx = new TweetCommentRepostDay(scope, tt.getTagsString(), 0, 0, 1, tt.getYear(), tt.getMonth(), tt.getDay(), tt.getTweets(), tt.getComments(), 0, tt.getTweetId());
+                    tx.setAttitudes(tt.getAttitudes());
+                    System.out.println("*******************"+tt.getAttitudes());
+                    middleResList.add(tx);
+                }
+            } else {
+                List<TweetCommentRepostDay> tweetSingleList = middleMap.get(dateStr);
+                if (null == tweetSingleList) {
+                    tweetSingleList = Lists.newArrayList();
+                }
+                if (tweetSingleList.size() > 0) {
+                    for (TweetCommentRepostDay tt : tweetSingleList) {
+                        TweetCommentRepostDay tx = new TweetCommentRepostDay(scope, tt.getTagsString(), 0, 0, 1, tt.getYear(), tt.getMonth(), tt.getDay(), tt.getTweets(), tt.getComments(), tt.getReposts(), tt.getTweetId());
+                        System.out.println("*******************"+tt.getAttitudes());
+                        tx.setAttitudes(tt.getAttitudes());
+                        middleResList.add(tx);
+                    }
+                } else {
+                    TweetCommentRepostDay tx = new TweetCommentRepostDay(scope, "", 0, 0, 0, thisCal.get(Calendar.YEAR), thisCal.get(Calendar.MONTH) + 1, thisCal.get(Calendar.DAY_OF_MONTH), 0, 0, 0, "");
+                    middleResList.add(tx);
+                }
+            }
+            resultMap.put(dateStr, middleResList);
+        }
+        return resultMap;
+    }
+
+    private Map<String, List<TweetCommentRepostDay>> getTweetCommentRepostDay(String scope, String sql, Calendar startCal, Calendar endCal, String type) {
+        Map<String, List<TweetCommentRepostDay>> resultMap = Maps.newHashMap();
+        try (Connection connection = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = connection.prepareStatement(sql);) {
+            pstmt.setString(1, scope);
+            pstmt.setLong(2, startCal.getTime().getTime());
+            pstmt.setLong(3, endCal.getTime().getTime());
+            try (ResultSet rs = pstmt.executeQuery();) {
+                while (rs.next()) {
+                    String dateStr = new StringBuilder().append(rs.getInt(4)).append("-").append(rs.getInt(5)).append("-").append(rs.getInt(6)).toString();
+                    TweetCommentRepostDay tcrd = null;
+                    if ("tweet".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, rs.getString(3), 0, 0, 1, rs.getInt(4), rs.getInt(5), rs.getInt(6), 1, 0, 0, rs.getString(2));
+                        tcrd.setAttitudes(rs.getInt("attitudes_count"));
+                    } else if ("comment".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, "", 0, 0, 1, rs.getInt(4), rs.getInt(5), rs.getInt(6), 0, rs.getInt(3), 0, rs.getString(2));
+                    } else if ("retweet".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, "", 0, 0, 1, rs.getInt(4), rs.getInt(5), rs.getInt(6), 1, 0, rs.getInt(3), rs.getString(2));
+                    }
+                    List<TweetCommentRepostDay> singleList = resultMap.get(dateStr);
+                    if (null == singleList) {
+                        singleList = Lists.newArrayList();
+                        resultMap.put(dateStr, singleList);
+                    }
+                    singleList.add(tcrd);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return resultMap;
+    }
+    
+    private Map<String,TweetCommentRepostDay> getTweetDay2(String scope, String sql, Calendar startCal, Calendar endCal, String type) {
+        Map<String,TweetCommentRepostDay> resultMap = Maps.newHashMap();
+        try (Connection connection = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = connection.prepareStatement(sql);) {
+            pstmt.setString(1, scope);
+            pstmt.setLong(2, startCal.getTime().getTime());
+            pstmt.setLong(3, endCal.getTime().getTime());
+            try (ResultSet rs = pstmt.executeQuery();) {
+                while (rs.next()) {
+                    TweetCommentRepostDay tcrd = null;
+                    if ("tweet".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, rs.getString(3), 0, 0, 1, rs.getInt(4), rs.getInt(5), rs.getInt(6), 1, 0, 0, rs.getString(2));
+                        tcrd.setAttitudes(rs.getInt("attitudes_count"));
+                        resultMap.put(tcrd.getTweetId(), tcrd);
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return resultMap;
+    }
+    
+    private Map<String, Map<String,TweetCommentRepostDay>> getCommentRepostDay2(String scope, String sql, Calendar startCal, Calendar endCal, String type) {
+        Map<String, Map<String,TweetCommentRepostDay>> resultMap = Maps.newHashMap();
+        try (Connection connection = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = connection.prepareStatement(sql);) {
+            pstmt.setString(1, scope);
+            pstmt.setLong(2, startCal.getTime().getTime());
+            pstmt.setLong(3, endCal.getTime().getTime());
+            try (ResultSet rs = pstmt.executeQuery();) {
+                while (rs.next()) {
+                    String dateStr = new StringBuilder().append(rs.getInt(4)).append("-").append(rs.getInt(5)).append("-").append(rs.getInt(6)).toString();
+                    TweetCommentRepostDay tcrd = null;
+                    if ("tweet".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, rs.getString(3), 0, 0, 1, rs.getInt(4), rs.getInt(5), rs.getInt(6), 1, 0, 0, rs.getString(2));
+                        tcrd.setAttitudes(rs.getInt("attitudes_count"));
+                    } else if ("comment".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, "", 0, 0, 1, rs.getInt(4), rs.getInt(5), rs.getInt(6), 0, rs.getInt(3), 0, rs.getString(2));
+                    } else if ("retweet".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, "", 0, 0, 1, rs.getInt(4), rs.getInt(5), rs.getInt(6), 1, 0, rs.getInt(3), rs.getString(2));
+                    }
+                    Map<String,TweetCommentRepostDay> singleMap = resultMap.get(dateStr);
+                    if (null == singleMap) {
+                    	singleMap = Maps.newHashMap();
+                        resultMap.put(dateStr, singleMap);
+                    }
+                    singleMap.put(tcrd.getTweetId(),tcrd);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return resultMap;
+    }
+
+    private List<TweetCommentRepostDay> getTweetCommentRepostDayAndHour(String scope, String sql, Calendar startCal, Calendar endCal, String type) {
+        List<TweetCommentRepostDay> resultList = Lists.newArrayList();
+        try (Connection connection = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = connection.prepareStatement(sql);) {
+            try (ResultSet rs = pstmt.executeQuery();) {
+                while (rs.next()) {
+                    String dateStr = new StringBuilder().append(rs.getInt(4)).append("-").append(rs.getInt(5)).append("-").append(rs.getInt(6)).toString();
+                    TweetCommentRepostDay tcrd = null;
+                    if ("tweet".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, "", 0, 0, 1, rs.getInt(3), rs.getInt(4), rs.getInt(5), rs.getInt(2), 0, 0, "", rs.getInt(6));
+                    } else if ("comment".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, "", 0, 0, 1, rs.getInt(3), rs.getInt(4), rs.getInt(5), 0, rs.getInt(2), 0, "", rs.getInt(6));
+                    } else if ("retweet".equals(type)) {
+                        tcrd = new TweetCommentRepostDay(scope, "", 0, 0, 1, rs.getInt(3), rs.getInt(4), rs.getInt(5), 0, 0, rs.getInt(2), "", rs.getInt(6));
+                    }
+                    resultList.add(tcrd);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return resultList;
+    }
+
+    public Map<String, List<TweetCommentRepostDay>> getTweetCommentRepostDayWithoutDayHasTweet(Module module, Calendar startCal, Calendar endCal) {
+        Map<String, List<TweetCommentRepostDay>> result = Maps.newHashMap();
+        CrmTweetsDao tweetsDao = new CrmTweetsDao();
+        /**
+         * 首先查询出单天threadid
+         */
+        Map<String, List<String>> tweetIdMap = Maps.newHashMap();
+        String tweetSql = "select DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day, tweet_id from crm_tweet where cuser_id = ? and created_at >= ? and created_at < ? group by tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'));";
+        try (Connection connection = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = connection.prepareStatement(tweetSql);) {
+            pstmt.setString(1, module.getScope());
+            pstmt.setLong(2, startCal.getTime().getTime());
+            pstmt.setLong(3, endCal.getTime().getTime());
+            try (ResultSet rss = pstmt.executeQuery()) {
+                while (rss.next()) {
+                    String dateStr = new StringBuilder().append(rss.getInt(1)).append("-").append(rss.getInt(2)).append("-").append(rss.getInt(3)).toString();
+                    String tweetId = rss.getString(4);
+                    List<String> singleList = tweetIdMap.get(dateStr);
+                    if (null != singleList) {
+                        singleList.add(tweetId);
+                    } else {
+                        singleList = Lists.newArrayList();
+                        singleList.add(tweetId);
+                    }
+                    tweetIdMap.put(dateStr, singleList);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        /**
+         * 然后查询单天comments对于thread的分布 以及单天retweet对于thread的分布
+         */
+        Map<String, List<CommentRetweetInfo>> tweetCommentDateMap = Maps.newHashMap();
+        Map<String, List<CommentRetweetInfo>> retweetDateMap = Maps.newHashMap();
+        String tweetCommentSql = "select tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day, count(comment_id) as comments from crm_comment where cuser_id = ? and created_at >= ? and created_at < ? group by tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'))";
+        String retweetSql = "select tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as year, DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as month, DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')) as day, count(retweet_id) as reposts from crm_retweets where cuser_id = ? and created_at >= ? and created_at < ? group by tweet_id, DATE_PART('year',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('month',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s')), DATE_PART('day',CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + created_at * INTERVAL '0.001 s'))";
+        List<CommentRetweetInfo> tweetCommentsList = queryCommentOrRetweetWithType(module.getScope(), tweetCommentSql, "comment", startCal, endCal);
+        List<CommentRetweetInfo> retweetList = queryCommentOrRetweetWithType(module.getScope(), retweetSql, "retweet", startCal, endCal);
+        for (CommentRetweetInfo tweetComment : tweetCommentsList) {
+            String dateStr = new StringBuilder().append(tweetComment.getYear()).append("-").append(tweetComment.getMonth()).append("-").append(tweetComment.getDay()).toString();
+            List<CommentRetweetInfo> singleList = tweetCommentDateMap.get(dateStr);
+            if (null != singleList) {
+                singleList.add(tweetComment);
+            } else {
+                singleList = Lists.newArrayList();
+                singleList.add(tweetComment);
+            }
+            tweetCommentDateMap.put(dateStr, singleList);
+        }
+
+        for (CommentRetweetInfo retweet : retweetList) {
+            String dateStr = new StringBuilder().append(retweet.getYear()).append("-").append(retweet.getMonth()).append("-").append(retweet.getDay()).toString();
+            List<CommentRetweetInfo> singleList = retweetDateMap.get(dateStr);
+            if (null != singleList) {
+                singleList.add(retweet);
+            } else {
+                singleList = Lists.newArrayList();
+                singleList.add(retweet);
+            }
+            retweetDateMap.put(dateStr, singleList);
+        }
+        Map<String, TweetCommentRepostDay> thisResultMap = Maps.newHashMap();
+        for (Map.Entry<String, List<CommentRetweetInfo>> entry : tweetCommentDateMap.entrySet()) {
+            String dateStr = entry.getKey();
+            List<CommentRetweetInfo> singleList = entry.getValue();
+            List<String> tweetIdList = tweetIdMap.get(dateStr);
+            for (CommentRetweetInfo tweetComment : singleList) {
+                if (!tweetIdList.contains(tweetComment.getTweetId())) {
+                    TweetCommentRepostDay tcrd = thisResultMap.get(dateStr);
+                    if (null != tcrd) {
+                        tcrd.setComments(tcrd.getComments() + Integer.parseInt(String.valueOf(tweetComment.getCommentsCount())));
+                    } else {
+                        tcrd = new TweetCommentRepostDay(module.getScope(), "", 0, 0, 1, tweetComment.getYear(), tweetComment.getMonth(), tweetComment.getDay(), 0, tweetComment.getCommentsCount(), 0);
+                        thisResultMap.put(dateStr, tcrd);
+                    }
+                }
+            }
+        }
+        for (Map.Entry<String, List<CommentRetweetInfo>> entry : retweetDateMap.entrySet()) {
+            String dateStr = entry.getKey();
+            List<CommentRetweetInfo> singleList = entry.getValue();
+            List<String> tweetIdList = tweetIdMap.get(dateStr);
+            for (CommentRetweetInfo retweet : singleList) {
+                if (!tweetIdList.contains(retweet.getTweetId())) {
+                    TweetCommentRepostDay tcrd = thisResultMap.get(dateStr);
+                    if (null != tcrd) {
+                        tcrd.setComments(tcrd.getReposts() + retweet.getRepostsCount());
+                    } else {
+                        tcrd = new TweetCommentRepostDay(module.getScope(), "", 0, 0, 1, retweet.getYear(), retweet.getMonth(), retweet.getDay(), 0, 0, retweet.getRepostsCount());
+                        thisResultMap.put(dateStr, tcrd);
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    public Map<String, FollowersInfoDay> getFollowersInfoWithDay(String scope, Period period) {
+        Map<String, FollowersInfoDay> resultMap = Maps.newHashMap();
+        long maxDayToRun = period.getInterval() + 2;
+//        Calendar midNight = DateUtils.getLocalMidNight(System.currentTimeMillis());
+        Calendar midNight = period.getEnd();
+        for (int i = 0; i <= maxDayToRun; i++) {
+            Calendar endCal = DateUtils.getUTC8NDaysAgo(midNight, i);
+            Calendar startCal = DateUtils.getUTC8NDaysAgo(midNight, i + 1);
+            String dateStr = new StringBuilder().append(endCal.get(Calendar.YEAR)).append("-").append(endCal.get(Calendar.MONTH) + 1).append("-").append(endCal.get(Calendar.DAY_OF_MONTH)).toString();
+            //n2
+            Long newFollowers = calWeiboNewFollower(scope, startCal, endCal, false);
+            System.out.println(dateStr + "\t" + newFollowers);
+            Long followersCount = 0L;
+            Long lastFollowersCount = 0L;
+            CrmFollowerTracker cftk = getFollowersCountWithTime(scope, endCal);
+            CrmFollowerTracker lastCftk = getFollowersCountWithTime(scope, startCal);
+            Long totalNewFollowerWithSpammer = 0L;//n1
+            Long netIncrement = 0L;//n3
+            Long dropouts = 0L;//n4
+            if (null != cftk) {
+                followersCount = cftk.getFollowersCount();
+                if (null != lastCftk) {
+                    lastFollowersCount = lastCftk.getFollowersCount();
+                } else {
+                    lastFollowersCount = followersCount;
+                }
+                netIncrement = followersCount - lastFollowersCount;
+                totalNewFollowerWithSpammer = cftk.getNetFollowerIncrementWithSpammer();
+                if (null == totalNewFollowerWithSpammer) {
+                    totalNewFollowerWithSpammer = 0L;
+                }
+                if (totalNewFollowerWithSpammer.longValue() < newFollowers.longValue()) {
+                    totalNewFollowerWithSpammer = new Long(newFollowers);
+                }
+                if (totalNewFollowerWithSpammer.longValue() < netIncrement.longValue()) {
+                    totalNewFollowerWithSpammer = new Long(netIncrement);
+                }
+                dropouts = totalNewFollowerWithSpammer - netIncrement;
+            }
+
+            FollowersInfoDay infoDay = new FollowersInfoDay(scope, endCal.get(Calendar.YEAR), endCal.get(Calendar.MONTH) + 1, endCal.get(Calendar.DAY_OF_MONTH), newFollowers, 0, 0, followersCount);
+            infoDay.setFollowersCount(followersCount);
+            infoDay.setNetIncrement(netIncrement);
+            infoDay.setNewFollowersWithoutSpammer(newFollowers);
+            infoDay.setNewFollowersWithSpammer(totalNewFollowerWithSpammer);
+            infoDay.setDropouts(dropouts);
+            resultMap.put(dateStr, infoDay);
+        }
+        return resultMap;
+    }
+
+    private CrmFollowerTracker getFollowersCountWithTime(String scope, Calendar cal) {
+        CrmFollowerTracker result = null;
+        String sql = "select * from follower_tracker where cuser_id ='" + scope + "' and date < " + cal.getTime().getTime() + " order by date desc limit 1;";
+        try (Connection conn = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = conn.prepareStatement(sql)){
+            ResultSet rss = pstmt.executeQuery();
+            while (rss.next()) {
+                result = new CrmFollowerTracker(rss.getString("cuser_id"), rss.getLong("date"), rss.getLong("followers_count"), rss.getLong("friends_count"), rss.getDouble("spam_rate"), rss.getLong("net_follower_increment_with_spammer"));
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return result;
+    }
+
+    public Map<String, FollowersInfoDay> getTodayFollowersInfoWithDay(String scope, Calendar startTime, Calendar endTime) {
+        Map<String, FollowersInfoDay> resultMap = Maps.newHashMap();
+        CrmCuserFollowerDao cuserFollowerDao = new CrmCuserFollowerDao();
+        CrmFollowerTrackerDao followerTrackerDao = new CrmFollowerTrackerDao();
+        Long lastFollowersCount = 0L;
+        String dateStr = new StringBuilder().append(startTime.get(Calendar.YEAR)).append("-").append(startTime.get(Calendar.MONTH) + 1).append("-").append(startTime.get(Calendar.DAY_OF_MONTH)).toString();
+        //n2
+        Long newFollowers = Long.parseLong(String.valueOf(cuserFollowerDao.countByCond(new String[]{"cuser_id", "created_at", "created_at"}, new String[]{"=", ">=", "<"}, new Object[]{scope, startTime.getTime().getTime(), startTime.getTime().getTime()})));
+        Long followersCount = 0L;
+        List<CrmFollowerTracker> ufList = followerTrackerDao.queryBySql("cuser_id ='" + scope + "' and date < " + startTime.getTime().getTime() + " order by date desc limit 1");
+        List<CrmFollowerTracker> lastUfList = followerTrackerDao.queryBySql("cuser_id ='" + scope + "' and date < " + startTime.getTime().getTime() + " order by date desc limit 1");
+        Long totalNewFollowerWithSpammer = 0L;//n1
+        Long netIncrement = 0L;//n3
+        Long dropouts = 0L;//n4
+        if (null != ufList && ufList.size() > 0) {
+            followersCount = ufList.get(0).getFollowersCount();
+            if (null != lastUfList && lastUfList.size() > 0) {
+                lastFollowersCount = lastUfList.get(0).getFollowersCount();
+            } else {
+                lastFollowersCount = followersCount;
+            }
+            netIncrement = followersCount - lastFollowersCount;
+            totalNewFollowerWithSpammer = ufList.get(0).getNetFollowerIncrementWithSpammer();
+            if (totalNewFollowerWithSpammer == null) {
+                totalNewFollowerWithSpammer = 0L;
+            }
+            if (totalNewFollowerWithSpammer.longValue() < newFollowers.longValue()) {
+                totalNewFollowerWithSpammer = new Long(newFollowers);
+            }
+            if (totalNewFollowerWithSpammer.longValue() < netIncrement.longValue()) {
+                totalNewFollowerWithSpammer = new Long(netIncrement);
+            }
+            dropouts = totalNewFollowerWithSpammer - netIncrement;
+        }
+        FollowersInfoDay infoDay = new FollowersInfoDay(scope, startTime.get(Calendar.YEAR), startTime.get(Calendar.MONTH) + 1, startTime.get(Calendar.DAY_OF_MONTH), newFollowers, 0, 0, followersCount);
+        infoDay.setFollowersCount(followersCount);
+        infoDay.setNetIncrement(netIncrement);
+        infoDay.setNewFollowersWithoutSpammer(newFollowers);
+        infoDay.setNewFollowersWithSpammer(totalNewFollowerWithSpammer);
+        infoDay.setDropouts(dropouts);
+        resultMap.put(dateStr, infoDay);
+
+        return resultMap;
+    }
+
+    public Map<String, List<SourceDistribuInfo>> getSourceDistribuInfoWithSqlAndType(String scope, String sql, Calendar startCal, Calendar endCal) {
+        Map<String, List<SourceDistribuInfo>> resultMap = Maps.newHashMap();
+        Calendar middleNight = DateUtils.getMidNight();
+        if (null == startCal || null == endCal) {
+            startCal = DateUtils.getNDaysAgo(middleNight, MAX_DAYS);
+            endCal = DateUtils.getNDaysAgo(middleNight, 0);
+        }
+        try (Connection connection = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = connection.prepareStatement(sql);) {
+            pstmt.setString(1, scope);
+            pstmt.setLong(2, startCal.getTime().getTime());
+            pstmt.setLong(3, endCal.getTime().getTime());
+            pstmt.setString(4, scope);
+            pstmt.setLong(5, startCal.getTime().getTime());
+            pstmt.setLong(6, endCal.getTime().getTime());
+            try (ResultSet rss = pstmt.executeQuery()) {
+                while (rss.next()) {
+                    String source = rss.getString(2);
+                    if (null == source) {
+                        source = rss.getString(9);
+                    }
+                    String positiveTagsString = rss.getString(3);
+                    if (null == positiveTagsString) {
+                        positiveTagsString = rss.getString(10);
+                    }
+                    Integer year = rss.getInt(4);
+                    if (null == year || year == 0) {
+                        year = rss.getInt(11);
+                    }
+                    Integer month = rss.getInt(5);
+                    if (null == month || month == 0) {
+                        month = rss.getInt(12);
+                    }
+                    Integer day = rss.getInt(6);
+                    if (null == day || day == 0) {
+                        day = rss.getInt(13);
+                    }
+                    Integer commentsCount = rss.getInt(7);
+                    if (null == commentsCount) {
+                        commentsCount = 0;
+                    }
+                    Integer retweetsCount = rss.getInt(14);
+                    if (null == retweetsCount) {
+                        retweetsCount = 0;
+                    }
+                    String dateStr = new StringBuilder().append(year).append("-").append(month).append("-").append(day).toString();
+                    SourceDistribuInfo sdInfo = new SourceDistribuInfo(scope, source, positiveTagsString, year, month, day, commentsCount + retweetsCount);
+
+                    List<SourceDistribuInfo> singleList = resultMap.get(dateStr);
+                    if (null == singleList) {
+                        singleList = Lists.newArrayList();
+                        resultMap.put(dateStr, singleList);
+                    }
+                    singleList.add(sdInfo);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return resultMap;
+    }
+
+    private List<CommentRetweetInfo> queryCommentOrRetweetWithType(String scope, String sql, String type, Calendar startCal, Calendar endCal) {
+        List<CommentRetweetInfo> result = Lists.newArrayList();
+        try (Connection connection = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = connection.prepareStatement(sql);) {
+            pstmt.setString(1, scope);
+            pstmt.setLong(2, startCal.getTime().getTime());
+            pstmt.setLong(3, endCal.getTime().getTime());
+            try (ResultSet rss = pstmt.executeQuery()) {
+                while (rss.next()) {
+                    CommentRetweetInfo crInfo = new CommentRetweetInfo(scope, rss.getString(1), rss.getInt(2), rss.getInt(3), rss.getInt(4), 0, 0);
+                    if ("retweet".equals(type)) {
+                        crInfo.setRepostsCount(rss.getInt(5));
+                    } else if ("comment".equals(type)) {
+                        crInfo.setCommentsCount(rss.getInt(5));
+                    }
+                    result.add(crInfo);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return result;
+    }
+
+    private Map<String, List<CommentRetweetInfo>> queryCommentOrRetweetTopPostWithType(String scope, String sql, String type, Calendar startCal, Calendar endCal) {
+        Map<String, List<CommentRetweetInfo>> resultMap = Maps.newHashMap();
+        List<CommentRetweetInfo> result = Lists.newArrayList();
+        try (Connection connection = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = connection.prepareStatement(sql);) {
+            pstmt.setString(1, scope);
+            pstmt.setLong(2, startCal.getTime().getTime());
+            pstmt.setLong(3, endCal.getTime().getTime());
+            try (ResultSet rss = pstmt.executeQuery()) {
+                while (rss.next()) {
+                    String dateStr = new StringBuilder().append(rss.getInt(5)).append("-").append(rss.getInt(6)).append("-").append(rss.getInt(7)).toString();
+                    CommentRetweetInfo crInfo = new CommentRetweetInfo(scope, rss.getString(2), rss.getInt(5), rss.getInt(6), rss.getInt(7), 0, 0, rss.getString(3), type);
+                    if ("retweet".equals(type)) {
+                        crInfo.setRepostsCount(rss.getInt(8));
+                    } else if ("comment".equals(type)) {
+                        crInfo.setCommentsCount(rss.getInt(8));
+                    }
+                    List<CommentRetweetInfo> singleList = resultMap.get(dateStr);
+                    if (null == singleList || singleList.size() <= 0) {
+                        singleList = Lists.newArrayList();
+                        resultMap.put(dateStr, singleList);
+                    }
+                    Collections.sort(singleList, new Comparator<CommentRetweetInfo>() {
+                        @Override
+                        public int compare(CommentRetweetInfo o1, CommentRetweetInfo o2) {
+                            int flag = 0;
+                            if ("retweet".equals(o1.getType())) {
+                                if (o1.getRepostsCount() > o2.getRepostsCount()) {
+                                    flag = -1;
+                                } else if (o1.getRepostsCount() < o2.getRepostsCount()) {
+                                    flag = 1;
+                                } else {
+                                    flag = 0;
+                                }
+                            }
+                            if ("comment".equals(o1.getType())) {
+                                if (o1.getCommentsCount() > o2.getCommentsCount()) {
+                                    flag = -1;
+                                } else if (o1.getCommentsCount() < o2.getCommentsCount()) {
+                                    flag = 1;
+                                } else {
+                                    flag = 0;
+                                }
+                            }
+                            return flag;
+                        }
+                    });
+                    if (singleList.size() <= 0) {
+                        singleList.add(crInfo);
+                    } else if ("retweet".equals(type)) {
+                        if (singleList.size() >= 3) {
+                            if (singleList.get(singleList.size() - 1).getRepostsCount() <= crInfo.getRepostsCount()) {
+                                singleList.remove(singleList.size() - 1);
+                                singleList.add(crInfo);
+                            }
+                        } else {
+                            singleList.add(crInfo);
+                        }
+                    } else if ("comment".equals(type)) {
+                        if (singleList.size() >= 3) {
+                            if (singleList.get(singleList.size() - 1).getCommentsCount() <= crInfo.getCommentsCount()) {
+                                singleList.remove(singleList.size() - 1);
+                                singleList.add(crInfo);
+                            }
+                        } else {
+                            singleList.add(crInfo);
+                        }
+                    }
+                    resultMap.put(dateStr, singleList);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return resultMap;
+    }
+
+    public int calWeiboComments(String scope, String period, Calendar start, Calendar end, boolean b) {
+
+        Calendar prevStartTime = null;
+        Calendar prevEndTime = null;
+        //判断是否是上一个时间段
+        if (b) {
+            prevStartTime = DateUtils.getNDaysAgo(start, (int) ((end.getTimeInMillis() - start.getTimeInMillis()) / (24 * 60 * 60 * 1000)));
+            prevEndTime = DateUtils.getNDaysAgo(start, 0);
+        } else {
+            prevStartTime = start;
+            prevEndTime = end;
+        }
+
+        String sql = "select count(distinct(CONCAT(tweet_id, comment_id))) from crm_comment where cuser_id = ? and created_at >= ? and created_at < ?";
+        if ("30".equals(period) && !b) {
+            LOGGER.info("-------------------calWeiboReTweets------------------------- : " + period);
+            LOGGER.info("starttime : " + prevStartTime.getTime().getTime());
+            LOGGER.info("starttime : " + prevEndTime.getTime().getTime());
+            LOGGER.info("-------------------calWeiboReTweets-------------------------" + period);
+        }
+        int result = 0;
+        try (Connection conn = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setString(1, scope);
+            if ("today".equals(period)) {
+                pstmt.setLong(2, prevStartTime.getTime().getTime());
+                pstmt.setLong(3, prevEndTime.getTime().getTime());
+            } else {
+                pstmt.setLong(2, prevStartTime.getTime().getTime());
+                pstmt.setLong(3, prevEndTime.getTime().getTime());
+            }
+
+            try (ResultSet rss = pstmt.executeQuery()) {
+                while (rss.next()) {
+                    result = rss.getInt(1);
+                }
+            } catch (Exception e) {
+
+            }
+        } catch (Exception e) {
+
+        }
+        return result;
+    }
+
+    public int calWeiboReTweets(String scope, String period, Calendar start, Calendar end, boolean flag) {
+        Calendar prevStartTime = null;
+        Calendar prevEndTime = null;
+        if (flag) {
+            prevStartTime = DateUtils.getNDaysAgo(start, (int) ((end.getTimeInMillis() - start.getTimeInMillis()) / (24 * 60 * 60 * 1000)));
+            prevEndTime = DateUtils.getNDaysAgo(start, 0);
+        } else {
+            prevStartTime = start;
+            prevEndTime = end;
+        }
+
+        String sql = "select count(distinct(CONCAT(tweet_id, retweet_id))) from crm_retweets where cuser_id = ? and created_at >= ? and created_at < ?";
+        if ("30".equals(period) && !flag) {
+            LOGGER.info("-------------------calWeiboReTweets------------------------- : " + period);
+            LOGGER.info("starttime : " + prevStartTime.getTime().getTime());
+            LOGGER.info("starttime : " + prevEndTime.getTime().getTime());
+            LOGGER.info("-------------------calWeiboReTweets-------------------------" + period);
+        }
+        int result = 0;
+        try (Connection conn = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setString(1, scope);
+            pstmt.setLong(2, prevStartTime.getTime().getTime());
+            pstmt.setLong(3, prevEndTime.getTime().getTime());
+            try (ResultSet rss = pstmt.executeQuery()) {
+                while (rss.next()) {
+                    result = rss.getInt(1);
+                }
+            } catch (Exception e) {
+
+            }
+        } catch (Exception e) {
+
+        }
+        return result;
+    }
+
+    public int calWeiboTweets(String scope, String period, Calendar start, Calendar end, boolean b) {
+        Calendar prevStartTime = null;
+        Calendar prevEndTime = null;
+        //判断是否是上一个时间段
+        if (b) {
+            prevStartTime = DateUtils.getNDaysAgo(start, (int) ((end.getTimeInMillis() - start.getTimeInMillis()) / (24 * 60 * 60 * 1000)));
+            prevEndTime = DateUtils.getNDaysAgo(start, 0);
+        } else {
+            prevStartTime = start;
+            prevEndTime = end;
+        }
+//        String sql = "select count(*) from crm_tweet where cuser_id = '" + scope + "' and created_at >= " + prevStartTime.getTime().getTime() + " and created_at < " + prevEndTime.getTime().getTime() + " group by tweet_id";
+        String sql = "select count(distinct tweet_id) from crm_tweet where cuser_id = ? and created_at >= ? and created_at < ?";
+        int result = 0;
+        try (Connection conn = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setString(1, scope);
+            pstmt.setLong(2, prevStartTime.getTime().getTime());
+            pstmt.setLong(3, prevEndTime.getTime().getTime());
+            try (ResultSet rss = pstmt.executeQuery()) {
+                while (rss.next()) {
+                    result = rss.getInt(1);
+                }
+            } catch (Exception e) {
+
+            }
+        } catch (Exception e) {
+
+        }
+        return result;
+    }
+
+    public long calWeiboNewFollower(String scope, Calendar start, Calendar end, boolean b) {
+        Calendar prevStartTime = null;
+        Calendar prevEndTime = null;
+        //判断是否是上一个时间段
+        if (b) {
+            prevStartTime = DateUtils.getUTC8NDaysAgo(start, (int) ((end.getTimeInMillis() - start.getTimeInMillis()) / (24 * 60 * 60 * 1000)));
+            prevEndTime = DateUtils.getUTC8NDaysAgo(start, 0);
+        } else {
+            prevStartTime = start;
+            prevEndTime = end;
+        }
+        long newFollowers = 0L;
+        String sql = "select count(DISTINCT(follower_id)) as count_num from cuser_follower where cuser_id = '" + scope + "' and created_at >= " + prevStartTime.getTime().getTime() + " and created_at < " + prevEndTime.getTime().getTime() + ";";
+        try (Connection conn = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = conn.prepareStatement(sql)){
+            ResultSet rss = pstmt.executeQuery();
+            while (rss.next()) {
+                newFollowers = rss.getLong("count_num");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        return newFollowers;
+    }
+
+    public void startupWeiboModule(Module module) {
+        ModuleDao moduleDao = new ModuleDao();
+        moduleDao.updateByCond(new String[]{"status", "instance", "error_date", "error_log"}, new Object[]{Module.Status.RUNNING.value(), EC2.getSelfInstanceId(), null,
+                null}, new String[]{"scope"}, new String[]{"="}, new Object[]{module.getScope()});
+        clearErrorData(module);
+    }
+
+    public void clearWeiboTodayErrorData(Module module) {
+        String scope = module.getScope();
+        Calendar cal = DateUtils.getMidNight();
+        WeiboDashboardDao weiboDashboardDao = new WeiboDashboardDao();
+        weiboDashboardDao.clearByCond(new String[]{"scope", "period", "version"}, new String[]{"=", "=", "="}, new Object[]{scope, "today", DEFAULT_VERSION});
+        WeiboAnalyticDao weiboAnalyticDao = new WeiboAnalyticDao();
+        weiboAnalyticDao.clearByCond(new String[]{"scope", "date_time", "version"}, new String[]{"=", ">=", "="}, new Object[]{scope, new Timestamp(cal.getTime().getTime()), DEFAULT_VERSION});
+        WeiboTopicDao weiboTopicDao = new WeiboTopicDao();
+        weiboTopicDao.clearByCond(new String[]{"scope", "created_time", "version"}, new String[]{"=", ">=", "="}, new Object[]{scope, new Timestamp(cal.getTime().getTime()), DEFAULT_VERSION});
+        WeiboExposureDao exposureDao = new WeiboExposureDao();
+        exposureDao.clearByCond(new String[]{"scope", "date_time", "version"}, new String[]{"=", ">=", "="}, new Object[]{scope, new Timestamp(cal.getTime().getTime()), DEFAULT_VERSION});
+        WeiboSourceDistributionDao distributionDao = new WeiboSourceDistributionDao();
+        distributionDao.clearByCond(new String[]{"scope", "date_time", "version"}, new String[]{"=", ">=", "="}, new Object[]{scope, new Timestamp(cal.getTime().getTime()), DEFAULT_VERSION});
+        WeiboTopPostDao topPostDao = new WeiboTopPostDao();
+        topPostDao.clearByCond(new String[]{"scope", "date", "version"}, new String[]{"=", ">=", "="}, new Object[]{scope, new Timestamp(cal.getTime().getTime()), DEFAULT_VERSION});
+    }
+
+    private void clearErrorData(Module module) {
+        String scope = module.getScope();
+        WeiboDashboardDao weiboDashboardDao = new WeiboDashboardDao();
+        weiboDashboardDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", "="}, new Object[]{scope, DEFAULT_VERSION});
+        WeiboAnalyticDao weiboAnalyticDao = new WeiboAnalyticDao();
+        weiboAnalyticDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", "="}, new Object[]{scope, DEFAULT_VERSION});
+        WeiboTopicDao weiboTopicDao = new WeiboTopicDao();
+        weiboTopicDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", "="}, new Object[]{scope, DEFAULT_VERSION});
+        WeiboExposureDao exposureDao = new WeiboExposureDao();
+        exposureDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", "="}, new Object[]{scope, DEFAULT_VERSION});
+        WeiboSourceDistributionDao distributionDao = new WeiboSourceDistributionDao();
+        distributionDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", "="}, new Object[]{scope, DEFAULT_VERSION});
+        WeiboTopPostDao topPostDao = new WeiboTopPostDao();
+        topPostDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", "="}, new Object[]{scope, DEFAULT_VERSION});
+    }
+
+    public void cacheWeiboCommentsOfThreads(Module module, Calendar startTime, Calendar endTime) throws Exception {
+        Map<String, List<CrmTweetComments>> resultMap = Maps.newHashMap();
+        Map<String, BasicDate> basicDateMap = module.getUTC8ToDoMap();
+        if (null == startTime || null == endTime) {
+            BasicDate ninetyPeriod = basicDateMap.get("90");
+            startTime = ninetyPeriod.getStartTime();
+            endTime = ninetyPeriod.getEndTime();
+        }
+        CrmTweetsDao tweetsDao = new CrmTweetsDao();
+        long tBeginTimes = System.currentTimeMillis();
+        List<CrmTweets> tweetsList = tweetsDao.queryByCond(new String[]{"cuser_id", "created_at", "created_at"}, new String[]{"=", ">=", "<"}, new Object[]{module.getScope(), startTime.getTime().getTime(), endTime.getTime().getTime()});
+        long tEndTimes = System.currentTimeMillis();
+        System.out.println("================tweetsDao.queryByCond need times : " + (tEndTimes - tBeginTimes) + " load about tweet size : " + tweetsList.size());
+        String sql = "select r_tab.*, cus.screen_name, cus.profile_image_url from (select ct.tweet_id, ct.cuser_id, ct.created_at as tweet_created_at, ct.year as tweet_year, ct.month as tweet_month, ct.day as tweet_day, ct.comments_count, ct.reposts_count, ct.text as tweet_text, cc.comment_id, cc.text as comment_text, cc.user_id, cc.created_at as comment_created_at from crm_tweet ct left join crm_comment cc on ct.tweet_id = cc.tweet_id where ct.cuser_id = ? and ct.created_at >= ? and ct.created_at < ?) r_tab left join crm_users cus on r_tab.user_id = cus.user_id;";
+        try (Connection conn = Redshift.getConnection(Redshift.DataBase.REDSHIFTWEIBO);
+             PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setString(1, module.getScope());
+            pstmt.setLong(2, startTime.getTime().getTime());
+            pstmt.setLong(3, endTime.getTime().getTime());
+            try (ResultSet rss = pstmt.executeQuery()) {
+                while (rss.next()) {
+                    String tweetId = rss.getString(1);
+                    List<CrmTweetComments> singleList = resultMap.get(tweetId);
+                    if (null == singleList) {
+                        singleList = Lists.newArrayList();
+                        resultMap.put(tweetId, singleList);
+                    }
+                    if (null != rss.getString(10) && !"".equals(rss.getString(10))) {
+                        CrmTweetComments ctcs = new CrmTweetComments(rss.getString(1), rss.getString(10), rss.getString(11), rss.getString(12), rss.getLong(13));
+                        CrmUsers cus = new CrmUsers(rss.getString(14), rss.getString(15));
+                        ctcs.setUser(cus);
+                        singleList.add(ctcs);
+                    }
+                }
+
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        long cacheBeginTimes = System.currentTimeMillis();
+        Map<String, CrmTweets> tweetsMap = Maps.newHashMap();
+        for (CrmTweets ct : tweetsList) {
+            tweetsMap.put(ct.getTweetId(), ct);
+        }
+        for (Map.Entry<String, List<CrmTweetComments>> entry : resultMap.entrySet()) {
+            String key = entry.getKey();
+            List<CrmTweetComments> singleList = entry.getValue();
+            long cacheOneBeginTimes = System.currentTimeMillis();
+            Post.saveRedshiftWeiboCommentToElasticCache(tweetsMap.get(key), singleList, module);
+            long cacheOneEndTimes = System.currentTimeMillis();
+            System.out.println("--------cache on tweet comments count " + singleList.size() + " need time : " + (cacheOneEndTimes - cacheOneBeginTimes));
+        }
+        long cacheEndTimes = System.currentTimeMillis();
+        System.out.println("+++++++++++++Post.saveRedshiftWeiboCommentToElasticCache all need : " + (cacheEndTimes - cacheBeginTimes));
+    }
+
+    /**
+     * 缓存 weibo_thread 表中 thread 的comment
+     */
+    public void cacheWeiboCommentsOfThreadsByScope(Module module) throws Exception {
+        CrmTweetsDao tweetsDao = new CrmTweetsDao();
+        Map<String, BasicDate> basicDateMap = module.getUTC8ToDoMap();
+        BasicDate ninetyPeriod = basicDateMap.get("90");
+        List<CrmTweets> tweetsList = tweetsDao.queryByCond(new String[]{"cuser_id", "created_at", "created_at"}, new String[]{"=", ">=", "<"}, new Object[]{module.getScope(), ninetyPeriod.getStartTime().getTime().getTime(), ninetyPeriod.getEndTime().getTime().getTime()});
+        CrmTweetCommentsDao tweetCommentsDao = new CrmTweetCommentsDao();
+        CrmUsersDao usersDao = new CrmUsersDao();
+        int cnt = 0;
+        for (CrmTweets tweet : tweetsList) {
+            cnt++;
+            List<CrmTweetComments> tweetCommentsList = tweetCommentsDao.queryByCond(new String[]{"tweet_id"}, new String[]{"="}, new Object[]{tweet.getTweetId()});
+            List<String> userIdList = Lists.newArrayList();
+            for (CrmTweetComments tweetComments : tweetCommentsList) {
+                if (null != tweetComments.getUserId()) {
+                    userIdList.add(tweetComments.getUserId());
+                }
+            }
+            List<CrmUsers> usersList = null;
+            if (userIdList.size() > 0) {
+                System.out.println("------" + module.getScope() + "---tweets_count : " + tweetsList.size() + "---has do number : " + cnt + "---user ids length : " + userIdList.size());
+                usersList = usersDao.queryByCond(new String[]{"user_id"}, new String[]{"in"}, new Object[]{userIdList});
+            }
+            if (null == usersList) {
+                usersList = Lists.newArrayList();
+            }
+            Map<String, CrmUsers> singleUserMap = Maps.newHashMap();
+            for (CrmUsers cu : usersList) {
+                singleUserMap.put(cu.getUserId(), cu);
+            }
+            for (CrmTweetComments tweetComments : tweetCommentsList) {
+                if (null != singleUserMap.get(tweetComments.getUserId())) {
+                    tweetComments.setUser(singleUserMap.get(tweetComments.getUserId()));
+                }
+            }
+            Post.saveRedshiftWeiboCommentToElasticCache(tweet, tweetCommentsList, module);
+        }
+    }
+
+    public void updateWeiboDataVersion(Module module,Period period) {
+        String scope = module.getScope();
+        WeiboDashboardDao weiboDashboardDao = new WeiboDashboardDao();
+        WeiboTopicDao weiboTopicDao = new WeiboTopicDao();
+        WeiboCommentRetweetHourDistributionDao dao = new WeiboCommentRetweetHourDistributionDao();
+        WeiboExposureDao exposureDao = new WeiboExposureDao();
+        WeiboSourceDistributionDao distributionDao = new WeiboSourceDistributionDao();
+        WeiboTopPostDao topPostDao = new WeiboTopPostDao();
+        
+        WeiboAnalyticDao weiboAnalyticDao = new WeiboAnalyticDao();
+        weiboAnalyticDao.execute("update weibo_analytics set version = version + 1 where scope = '" + scope + "' and date_time >='"+DateUtils.date2MysqlFormat(period.getStart().getTime())+"'  and date_time <='"+DateUtils.date2MysqlFormat(DateUtils.getUTC8NDaysLater(period.getEnd(), 1).getTime())+"' order by version desc;");
+        weiboAnalyticDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+
+        
+        dao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+        dao.execute("update weibo_comment_retweet_hour_distribution set version = version + 1 where scope = '" + scope + "' and date_time >='"+DateUtils.date2MysqlFormat(period.getStart().getTime())+"'  and date_time <='"+DateUtils.date2MysqlFormat(period.getEnd().getTime())+"' order by version desc;");
+
+        
+        exposureDao.execute("update weibo_exposure set version = version + 1 where scope = '" + scope + "' and date_time >='"+DateUtils.date2MysqlFormat(period.getStart().getTime())+"'  and date_time <='"+DateUtils.date2MysqlFormat(period.getEnd().getTime())+"' order by version desc;");
+        exposureDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+
+        
+        distributionDao.execute("update weibo_source_distribution set version = version + 1 where scope = '" + scope + "' and date_time >='"+DateUtils.date2MysqlFormat(period.getStart().getTime())+"'  and date_time <='"+DateUtils.date2MysqlFormat(period.getEnd().getTime())+"' order by version desc;");
+        distributionDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+
+        
+        topPostDao.execute("update weibo_top_posts set version = version + 1 where scope = '" + scope + "'  and date >='"+DateUtils.date2MysqlFormat(period.getStart().getTime())+"'  and date <='"+DateUtils.date2MysqlFormat(period.getEnd().getTime())+"' order by version desc;");
+        topPostDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+
+        
+        if(period.isRoutine()){
+        	weiboDashboardDao.execute("update weibo_dashboards set version = version + 1 where scope = '" + scope + "' order by version desc;");
+            weiboDashboardDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+            weiboTopicDao.execute("update weibo_topics set version = version + 1 where scope = '" + scope + "' order by version desc;");
+            weiboTopicDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+            ModuleDao moduleDao = new ModuleDao();
+            moduleDao.updateByCond(new String[]{"status", "updated_time", "error_date", "error_log"}, new Object[]{Module.Status.FINISH.value(), DateUtils.timestamp2GMT8Calendar(System.currentTimeMillis()), null, null}, new String[]{"scope"}, new String[]{"="}, new Object[]{module.getScope()});
+        } else if (period.isCustomized()) {
+            weiboDashboardDao.execute("update weibo_dashboards set version = version + 1 where scope = '" + scope + "' and period = '" + period.getName() + "' order by version desc;");
+            weiboDashboardDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+            weiboTopicDao.execute("update weibo_topics set version = version + 1 where scope = '" + scope + "' and period = '" + period.getName() + "' order by version desc;");
+            weiboTopicDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+        }
+        
+        
+        
+    }
+
+    public void updateTodayWeiboDataVersion(Module module, Calendar startCal) {
+        String scope = module.getScope();
+        WeiboDashboardDao weiboDashboardDao = new WeiboDashboardDao();
+        weiboDashboardDao.execute("update weibo_dashboards set version = version + 1 where scope = '" + scope + "' and period = 'today' order by version desc;");
+        weiboDashboardDao.clearByCond(new String[]{"scope", "period", "version"}, new String[]{"=", "=", ">"}, new Object[]{scope, "today", MAX_VERSION});
+        WeiboAnalyticDao weiboAnalyticDao = new WeiboAnalyticDao();
+        weiboAnalyticDao.execute("update weibo_analytics set version = version + 1 where scope = '" + scope + "' and date_time >= '" + simpleDateFormat.format(startCal.getTime()) + "' order by version desc;");
+        weiboAnalyticDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+
+        WeiboTopicDao weiboTopicDao = new WeiboTopicDao();
+        weiboTopicDao.execute("update weibo_topics set version = version + 1 where scope = '" + scope + "' and period = 'today' order by version desc;");
+        weiboTopicDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+
+        WeiboCommentRetweetHourDistributionDao dao = new WeiboCommentRetweetHourDistributionDao();
+        dao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+        dao.execute("update weibo_comment_retweet_hour_distribution set version = version + 1 where scope = '" + scope + "' and date_time = '" + simpleDateFormat.format(startCal.getTime()) + "'  order by version desc;");
+
+        WeiboExposureDao exposureDao = new WeiboExposureDao();
+        exposureDao.execute("update weibo_exposure set version = version + 1 where scope = '" + scope + "' and date_time >= '" + simpleDateFormat.format(startCal.getTime()) + "' order by version desc;");
+        exposureDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+
+        WeiboSourceDistributionDao distributionDao = new WeiboSourceDistributionDao();
+        distributionDao.execute("update weibo_source_distribution set version = version + 1 where scope = '" + scope + "' and date_time = '" + simpleDateFormat.format(startCal.getTime()) + "' order by version desc;");
+        distributionDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+
+        WeiboTopPostDao topPostDao = new WeiboTopPostDao();
+        topPostDao.execute("update weibo_top_posts set version = version + 1 where scope = '" + scope + "' and date = '" + simpleDateFormat.format(startCal.getTime()) + "'  order by version desc;");
+        topPostDao.clearByCond(new String[]{"scope", "version"}, new String[]{"=", ">"}, new Object[]{scope, MAX_VERSION});
+        module.updateTodayTimestamp(System.currentTimeMillis());
+    }
+
+    @Override
+    public void calWeiboHeatMap(Module module,Period period) throws Exception {
+        CrmRetweetDao rDao = new CrmRetweetDao();
+        CrmTweetCommentsDao cDao = new CrmTweetCommentsDao();
+        Map<String, BasicDate> todoMap = module.getUTC8ToDoMap();
+        String cSql = "select count(comment_id) as count,DATE_PART('hour',cdate) as hour,date_trunc('day', cdate) as date_time,tags_string from " +
+                "(select crm_comment.cuser_id,crm_comment.comment_id,CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + crm_comment.created_at * INTERVAL '0.001 s') as cdate," +
+                "crm_tweet.tags_string from crm_comment left join crm_tweet on crm_comment.tweet_id = crm_tweet.tweet_id where crm_comment.cuser_id = @cuser_id and crm_comment.created_at >= @start and crm_comment.created_at < @end) c " +
+                "group by DATE_PART('hour',cdate),date_trunc('day', cdate),tags_string";
+        String rSql = "select count(retweet_id) as count,DATE_PART('hour',cdate) as hour,date_trunc('day', cdate) as date_time,tags_string from " +
+                "(select crm_retweets.cuser_id,crm_retweets.retweet_id,CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + crm_retweets.created_at * INTERVAL '0.001 s') as cdate," +
+                "crm_tweet.tags_string from crm_retweets left join crm_tweet on crm_retweets.tweet_id = crm_tweet.tweet_id where crm_retweets.cuser_id = @cuser_id and crm_retweets.created_at >= @start and crm_retweets.created_at < @end) c " +
+                "group by DATE_PART('hour',cdate),date_trunc('day', cdate),tags_string";
+
+        Map<String, Object> params = new HashMap<String, Object>();
+        params.put("cuser_id", module.getScope());
+        params.put("start", period.getStart().getTimeInMillis());
+        params.put("end", period.getEnd().getTimeInMillis());
+        List<Map> rr = rDao.executeQuery(rSql, params);
+        List<WeiboCommentRetweetHourDistribution> heatMap = new ArrayList<WeiboCommentRetweetHourDistribution>();
+        WeiboCommentRetweetHourDistributionDao dao = new WeiboCommentRetweetHourDistributionDao();
+        for (Map r : rr) {
+            String dateTime = r.get("date_time").toString();
+            Double hour = (Double) r.get("hour");
+            String tags = (String) r.get("tags_string");
+            WeiboCommentRetweetHourDistribution d = new WeiboCommentRetweetHourDistribution();
+            Date date = DateUtils.dateStrToDate(dateTime, "yyyy-MM-dd HH:mm:ss");
+            d.setDateTime(date);
+            d.setHour(hour.intValue());
+            Calendar c = DateUtils.timestamp2Calendar(date.getTime());
+            d.setYear(c.get(Calendar.YEAR));
+            d.setMonth(c.get(Calendar.MONTH) + 1);
+            d.setDay(c.get(Calendar.DATE));
+            d.setScope(module.getScope());
+            d.setTopic(tags);
+            d.setVersion(DEFAULT_VERSION);
+            d.setReposts((Long) r.get("count"));
+            d.setComments(0L);
+            heatMap.add(d);
+        }
+        dao.batchInsert(heatMap);
+    }
+
+    public void calTodayWeiboHeatMap(Module module, Calendar startTime, Calendar endTime) throws Exception {
+        CrmRetweetDao rDao = new CrmRetweetDao();
+        CrmTweetCommentsDao cDao = new CrmTweetCommentsDao();
+        Map<String, BasicDate> todoMap = module.getUTC8ToDoMap();
+        String cSql = "select count(comment_id) as count,DATE_PART('hour',cdate) as hour,date_trunc('day', cdate) as date_time,tags_string from " +
+                "(select crm_comment.cuser_id,crm_comment.comment_id,CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + crm_comment.created_at * INTERVAL '0.001 s') as cdate," +
+                "crm_tweet.tags_string from crm_comment left join crm_tweet on crm_comment.tweet_id = crm_tweet.tweet_id where crm_comment.cuser_id = @cuser_id and crm_comment.created_at >= @start and crm_comment.created_at < @end) c " +
+                "group by DATE_PART('hour',cdate),date_trunc('day', cdate),tags_string";
+        String rSql = "select count(retweet_id) as count,DATE_PART('hour',cdate) as hour,date_trunc('day', cdate) as date_time,tags_string from " +
+                "(select crm_retweets.cuser_id,crm_retweets.retweet_id,CONVERT_TIMEZONE('Asia/Shanghai',TIMESTAMP 'epoch' + crm_retweets.created_at * INTERVAL '0.001 s') as cdate," +
+                "crm_tweet.tags_string from crm_retweets left join crm_tweet on crm_retweets.tweet_id = crm_tweet.tweet_id where crm_retweets.cuser_id = @cuser_id and crm_retweets.created_at >= @start and crm_retweets.created_at < @end) c " +
+                "group by DATE_PART('hour',cdate),date_trunc('day', cdate),tags_string";
+
+        Map<String, Object> params = new HashMap<String, Object>();
+        params.put("cuser_id", module.getScope());
+        params.put("start", startTime.getTime().getTime());
+        params.put("end", endTime.getTime().getTime());
+        
+        List<Map> rr = new ArrayList<Map>();
+        try{
+        	rr = rDao.executeQuery(rSql, params);
+        }catch(Exception e){
+        	e.printStackTrace();
+        }
+        List<WeiboCommentRetweetHourDistribution> heatMap = new ArrayList<WeiboCommentRetweetHourDistribution>();
+        WeiboCommentRetweetHourDistributionDao dao = new WeiboCommentRetweetHourDistributionDao();
+        for (Map r : rr) {
+            String dateTime = r.get("date_time").toString();
+            Double hour = (Double) r.get("hour");
+            String tags = (String) r.get("tags_string");
+            WeiboCommentRetweetHourDistribution d = new WeiboCommentRetweetHourDistribution();
+            Date date = DateUtils.dateStrToDate(dateTime, "yyyy-MM-dd HH:mm:ss");
+            d.setDateTime(date);
+            d.setHour(hour.intValue());
+            Calendar c = DateUtils.timestamp2Calendar(date.getTime());
+            d.setYear(c.get(Calendar.YEAR));
+            d.setMonth(c.get(Calendar.MONTH) + 1);
+            d.setDay(c.get(Calendar.DATE));
+            d.setScope(module.getScope());
+            d.setTopic(tags);
+            d.setVersion(DEFAULT_VERSION);
+            d.setReposts((Long) r.get("count"));
+            d.setComments(0L);
+            heatMap.add(d);
+        }
+        dao.batchInsert(heatMap);
+    }
+
+
+    @SuppressWarnings("rawtypes")
+    @Override
+    public void calWeiboKolOverview(Module module) throws Exception {
+        String scope = module.getScope();
+        Map<String, BasicDate> periodConditions = module.getUTC8ToDoMap();
+        WeiboKolCuserFollowerResultDao dao = new WeiboKolCuserFollowerResultDao();
+        dao.clearByCond(new String[]{"cuserId", "version"}, new String[]{
+                "=", "="}, new Object[]{module.getScope(), MAX_VERSION});
+        CrmCuserFollowerDao cfDao = new CrmCuserFollowerDao();
+        CrmFollowerTrackerDao ftDao = new CrmFollowerTrackerDao();
+        for (Entry<String, BasicDate> e3 : periodConditions.entrySet()) {
+            Double spammerRate = ftDao.querySpammerRateInPeriod(module.getScope(), e3.getValue().getStartTime(), e3.getValue().getEndTime());
+            for (Entry<String, String> e1 : verifiedConds.entrySet()) {
+                for (Entry<String, String> e2 : genderConds.entrySet()) {
+                    for (Entry<String, String> e4 : followerCountConds
+                            .entrySet()) {
+                        for (Entry<String, String> e5 : locationConds
+                                .entrySet()) {
+                            LOGGER.info("calWeiboKolOverview condition e1 : " + e1.getKey() + "      " + e2.getKey() + "      " + e3.getKey() + "      " + e4.getKey() + "      " + e5.getKey());
+                            WeiboKolCuserFollowerResult wkcfr = new WeiboKolCuserFollowerResult();
+                            wkcfr.setCuserId(module.getScope());
+                            wkcfr.setVerifiedCond(e1.getKey());
+                            wkcfr.setGenderCond(e2.getKey());
+                            wkcfr.setPeriod(e3.getKey());
+                            wkcfr.setFollowerCond(e4.getKey());
+                            wkcfr.setLocationCond(e5.getKey());
+                            wkcfr.setVersion(DEFAULT_VERSION);
+
+
+                            for (int i = 0; i < queries.length; i++) {
+                                Query query = queries[i];
+                                StringBuilder sqlTpl = new StringBuilder(
+                                        "select ")
+                                        .append(query.getSelect())
+                                        .append(" from cuser_follower cf left join crm_users u on cf.follower_id = u.user_id")
+                                        .append(" left join (select user_id,count(*) as mc from crm_mentions cm where cm.created_at >=  ")
+                                        .append(e3.getValue().getStartTime().getTimeInMillis())
+                                        .append(" and cm.created_at <  ").append(e3.getValue().getEndTime().getTimeInMillis())
+                                        .append(" and cuser_id = '").append(scope).append("' ")
+                                        .append(" group by user_id) tcm on cf.follower_id = tcm.user_id ")
+                                        .append(" left join (select user_id,count(*) as rc from crm_retweets cr where cr.created_at >=  ")
+                                        .append(e3.getValue().getStartTime().getTimeInMillis())
+                                        .append(" and cr.created_at <  ").append(e3.getValue().getEndTime().getTimeInMillis())
+                                        .append(" and cuser_id = '").append(scope).append("' ")
+                                        .append(" group by user_id) tcr on cf.follower_id = tcr.user_id ")
+                                        .append(" left join (select user_id,count(*) as cc from crm_comment cc where cc.created_at >=  ")
+                                        .append(e3.getValue().getStartTime().getTimeInMillis())
+                                        .append(" and cc.created_at <  ").append(e3.getValue().getEndTime().getTimeInMillis())
+                                        .append(" and cc.cuser_id = '").append(scope).append("' ")
+                                        .append(" group by user_id) tcc on cf.follower_id = tcc.user_id ")
+                                        .append(" where cuser_id = '")
+                                        .append(scope).append("' ");
+                                if (query.getWhere() != null) {
+                                    sqlTpl.append(" AND ").append(
+                                            query.getWhere());
+                                }
+                                if (e1.getValue() != null) {
+                                    sqlTpl.append(" AND verified_type in (").append(e1.getValue()).append(") ");
+                                }
+                                if (e2.getValue() != null) {
+                                    sqlTpl.append(" AND gender = '")
+                                            .append(e2.getValue())
+                                            .append("' ");
+                                }
+                                if (e3.getValue() != null) {
+                                    sqlTpl.append(" AND cf.created_at >= ").append(e3.getValue().getStartTime().getTimeInMillis())
+                                            .append(" and cf.created_at <  ").append(e3.getValue().getEndTime().getTimeInMillis());
+                                }
+                                if (e4.getValue() != null) {
+                                    String between = e4.getValue();
+                                    Matcher m = digitPattern.matcher(between);
+                                    if (m.find()) {
+                                        sqlTpl.append(" AND followers_count >= ").append(m.group());
+                                    }
+                                    if (m.find()) {
+                                        sqlTpl.append(" AND followers_count < ").append(m.group());
+                                    }
+                                }
+                                if (e5.getValue() != null) {
+                                    sqlTpl.append(" AND province = '")
+                                            .append(e5.getValue())
+                                            .append("' ");
+                                }
+                                if (query.getGroup() != null) {
+                                    sqlTpl.append(" group by ").append(
+                                            query.getGroup());
+                                }
+
+                                boolean exist = false;
+                                List<Map> rs = cfDao.executeQuery(sqlTpl.toString(), null);
+                                switch (query.getName()) {
+                                    case "overview":
+                                        for (Map m : rs) {
+                                            exist = true;
+                                            wkcfr.setCount((Integer) m
+                                                    .get("count"));
+                                            wkcfr.setInfluence((Integer) m
+                                                    .get("influence"));
+                                        }
+                                        break;
+                                    case "interactive":
+                                        for (Map m : rs) {
+                                            Integer interactiveCount = (Integer) m
+                                                    .get("count");
+                                            wkcfr.setInteractiveCount(interactiveCount);
+                                        }
+                                        break;
+                                    case "gender":
+                                        Map<String, Integer> gender = new HashMap<String, Integer>();
+                                        for (Map m : rs) {
+                                            gender.put(
+                                                    (String) m.get("gender"),
+                                                    (Integer) m.get("count"));
+                                        }
+                                        wkcfr.setGender(gender);
+                                        break;
+                                    case "follower":
+                                        Map<String, Integer> followers = wkcfr.getFollowers();
+                                        if (followers == null) {
+                                            followers = new HashMap<String, Integer>();
+                                        }
+                                        for (Map m : rs) {
+                                            followers
+                                                    .put((String) m.get("followers"),
+                                                            (Integer) m.get("count"));
+                                        }
+                                        wkcfr.setFollowers(followers);
+                                        break;
+                                    case "verified":
+                                        Map<String, Integer> verified = wkcfr.getVerified();
+                                        if (verified == null) {
+                                            verified = new HashMap<String, Integer>();
+                                        }
+                                        for (Map m : rs) {
+                                            if ((Integer) m.get("verified_type") == -1) {
+                                                verified.put("Normal",
+                                                        (Integer) m.get("count"));
+                                            } else if ((Integer) m.get("verified_type") == 200 || (Integer) m.get("verified_type") == 220) {
+                                                if (verified.get("Master") == null) {
+                                                    verified.put("Master", 0);
+                                                }
+                                                verified.put("Master",
+                                                        verified.get("Master") + (Integer) m.get("count"));
+                                            } else {
+                                                if (verified.get("Verified") == null) {
+                                                    verified.put("Verified", 0);
+                                                }
+                                                verified.put("Verified", verified.get("Verified") + (Integer) m.get("count"));
+                                            }
+                                        }
+                                        wkcfr.setNewVerified(verified
+                                                .get("verified") == null ? 0
+                                                : verified.get("verified"));
+                                        wkcfr.setVerified(verified);
+                                        break;
+                                    case "location":
+                                        Map<String, Integer> location = new HashMap<String, Integer>();
+                                        for (Map m : rs) {
+                                            location.put((String) m.get("province"),
+                                                    (Integer) m.get("count"));
+                                        }
+                                        wkcfr.setLocations(location);
+                                        break;
+                                    case "zombie":
+                                        Map<String, Integer> zombie = new HashMap<String, Integer>();
+                                        Map<String, Double> zombiePer = new HashMap<String, Double>();
+                                        Integer total = 0;
+                                        for (Map m : rs) {
+                                            Integer count = (Integer) m.get("count");
+                                            if (!"all".equalsIgnoreCase((String) m.get("type"))) {
+                                                zombie.put((String) m.get("type"),
+                                                        count);
+                                                total += (count == null ? 0
+                                                        : count);
+                                            }
+                                        }
+                                        wkcfr.setHuman("N/A");
+                                        if (zombie.size() > 0) {
+                                            Integer humanCount = zombie
+                                                    .get("human");
+                                            if (humanCount != null) {
+                                                wkcfr.setHuman(NumberUtils.toDecimal1(humanCount
+                                                        .doubleValue()
+                                                        / total
+                                                        * 100
+                                                        * spammerRate)
+                                                        + "%");
+                                                zombiePer
+                                                        .put("human",
+                                                                NumberUtils
+                                                                        .toDecimal4(humanCount
+                                                                                .doubleValue()
+                                                                                / total
+                                                                                * spammerRate));
+                                            }
+                                            Integer zombieCount = zombie
+                                                    .get("zombie");
+                                            if (zombieCount != null) {
+                                                zombiePer
+                                                        .put("zombie",
+                                                                NumberUtils
+                                                                        .toDecimal4(zombieCount
+                                                                                .doubleValue()
+                                                                                / total
+                                                                                * spammerRate));
+                                            }
+                                            Integer suspectCount = zombie
+                                                    .get("suspect");
+                                            if (suspectCount != null) {
+                                                zombiePer
+                                                        .put("suspect",
+                                                                NumberUtils
+                                                                        .toDecimal4(suspectCount
+                                                                                .doubleValue()
+                                                                                / total
+                                                                                * spammerRate));
+                                            }
+                                            zombiePer
+                                                    .put("spammer",
+                                                            NumberUtils
+                                                                    .toDecimal4(1 - spammerRate));
+                                        } else {
+                                            zombiePer.put("unknown", 1.0);
+                                        }
+                                        wkcfr.setZombies(zombiePer);
+                                        break;
+                                }
+                                if (!exist) {
+                                    if ("overview".equals(query
+                                            .getName())) {
+                                        break;
+                                    }
+                                }
+                            }
+
+                            wkcfr.save();
+                        }
+                    }
+                }
+            }
+        }
+
+
+    }
+
+    public void generateCacheForKolList() {
+        WeiboKolCuserFollowerResultDao dao = new WeiboKolCuserFollowerResultDao();
+        dao.execute("truncate kol;");
+        dao.execute("INSERT INTO KOL (SELECT cuser_id,follower_id,"
+                + "screen_name,gender,province,city,location,verified_type,profile_image_url, "
+                + "followers_count,tweets_count,favourites_count, f.created_at as "
+                + "created_at from crm_users u join cuser_follower f on  (f.follower_id = u.user_id) "
+                + "where screen_name is not null and screen_name != '');");
+        
+        dao.execute("truncate kol_interactive;");
+        
+        dao.execute("INSERT INTO kol_interactive ("
+        		+ "SELECT interactive_table.icuser_id AS cuser_id,interactive_table.iuser_id AS user_id,"
+        		+ "screen_name,gender,province,city,location,verified_type,profile_image_url,followers_count,"
+        		+ "tweets_count,favourites_count,interactive_table.created_at,interactive FROM "
+        		+ "(SELECT(COALESCE (SUM(mc), 0) + COALESCE (SUM(rc), 0) + COALESCE (SUM(cc), 0)) AS interactive,"
+        		+ "COALESCE (tcr.cuser_id,tcc.cuser_id,tcm.cuser_id) AS icuser_id,"
+        		+ "COALESCE (tcr.user_id,tcc.user_id,tcm.user_id) AS iuser_id,"
+        		+ "COALESCE (mention_created,retweet_created,comment_created) AS created_at FROM "
+        		+ "(SELECT cuser_id,user_id,(created_at / 3600000) * 3600000 AS mention_created,"
+        		+ "COUNT (*) AS mc FROM crm_mentions cm GROUP BY cuser_id,user_id,mention_created) tcm "
+        		+ "FULL JOIN (SELECT cuser_id,user_id,COUNT (*) AS rc,(created_at / 3600000) * 3600000 AS retweet_created"
+        		+ " FROM crm_retweets cr GROUP BY cuser_id,user_id,retweet_created) tcr ON tcm.cuser_id = tcr.cuser_id "
+        		+ "AND tcm.user_id = tcr.user_id AND mention_created = retweet_created FULL JOIN "
+        		+ "(SELECT cuser_id,user_id,COUNT (*) AS cc,(created_at / 3600000) * 3600000 AS comment_created "
+        		+ "FROM crm_comment cc GROUP BY cuser_id,user_id,comment_created) tcc ON tcm.cuser_id = tcc.cuser_id "
+        		+ "AND tcm.user_id = tcc.user_id AND mention_created = comment_created GROUP BY icuser_id,iuser_id,created_at) "
+        		+ "interactive_table LEFT JOIN crm_users cu ON interactive_table.iuser_id = cu.user_id);");
+    }
+    
+    public static void main(String[] args) {
+		System.out.println("INSERT INTO kol_interactive ("
+        		+ "SELECT interactive_table.icuser_id AS cuser_id,interactive_table.iuser_id AS user_id,"
+        		+ "screen_name,gender,province,city,location,verified_type,profile_image_url,followers_count,"
+        		+ "tweets_count,favourites_count,interactive_table.created_at,interactive FROM "
+        		+ "(SELECT(COALESCE (SUM(mc), 0) + COALESCE (SUM(rc), 0) + COALESCE (SUM(cc), 0)) AS interactive,"
+        		+ "COALESCE (tcr.cuser_id,tcc.cuser_id,tcm.cuser_id) AS icuser_id,"
+        		+ "COALESCE (tcr.user_id,tcc.user_id,tcm.user_id) AS iuser_id,"
+        		+ "COALESCE (mention_created,retweet_created,comment_created) AS created_at FROM "
+        		+ "(SELECT cuser_id,user_id,(created_at / 3600000) * 3600000 AS mention_created,"
+        		+ "COUNT (*) AS mc FROM crm_mentions cm GROUP BY cuser_id,user_id,mention_created) tcm "
+        		+ "FULL JOIN (SELECT cuser_id,user_id,COUNT (*) AS rc,(created_at / 3600000) * 3600000 AS retweet_created"
+        		+ " FROM crm_retweets cr GROUP BY cuser_id,user_id,retweet_created) tcr ON tcm.cuser_id = tcr.cuser_id "
+        		+ "AND tcm.user_id = tcr.user_id AND mention_created = retweet_created FULL JOIN "
+        		+ "(SELECT cuser_id,user_id,COUNT (*) AS cc,(created_at / 3600000) * 3600000 AS comment_created "
+        		+ "FROM crm_comment cc GROUP BY cuser_id,user_id,comment_created) tcc ON tcm.cuser_id = tcc.cuser_id "
+        		+ "AND tcm.user_id = tcc.user_id AND mention_created = comment_created GROUP BY icuser_id,iuser_id,created_at) "
+        		+ "interactive_table LEFT JOIN crm_users cu ON interactive_table.iuser_id = cu.user_id);");
+	}
+}

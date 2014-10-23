@@ -1,0 +1,29 @@
+development:    
+  adapter: mysql2
+  encoding: utf8
+  reconnect: false
+  database: survey
+  pool: 5
+  username: root
+  password: root
+  host: localhost
+
+test:
+  adapter: mysql2
+  encoding: utf8
+  reconnect: false
+  database: survey
+  pool: 5
+  username: root
+  password: root
+  host: localhost
+
+production:
+  adapter: mysql2
+  encoding: utf8
+  reconnect: false
+  database: qrcode
+  pool: 16
+  username: survey
+  password: j8MfYXcw
+  host: wildfirealiyunostrakon.mysql.rds.aliyuncs.com

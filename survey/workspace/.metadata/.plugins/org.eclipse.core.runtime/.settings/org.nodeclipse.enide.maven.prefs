@@ -1,0 +1,3 @@
+eclipse.preferences.version=1
+maven_home_to_use=/usr/local/apache-maven-3.2.1
+maven_option_alternative_settings=/usr/local/apache-maven-3.2.1/conf/settings.xml

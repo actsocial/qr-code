@@ -1,0 +1,39 @@
+source "https://rubygems.org"
+
+gem 'rack'
+gem 'sinatra'
+gem 'sinatra-contrib'
+gem "activerecord", "~> 3.2.13"
+gem 'mysql2'
+gem 'rake'
+
+# A fast JSON parser and Object marshaller
+gem 'oj'
+
+# High performance memcached client
+# gem 'dalli', :require => 'active_support/cache/dalli_store'
+
+# kgio provides non-blocking I/O methods 
+# intended for use with the Unicorn and Rainbows!
+# gem 'kgio'
+
+# gem "second_level_cache", :git => "git://github.com/csdn-dev/second_level_cache.git"
+
+
+group :production do
+  gem 'rainbows'
+end
+
+group :development do
+  gem 'thin'
+  gem 'pry'
+  gem "better_errors"
+  gem "binding_of_caller"
+end
+
+# group :test do
+#   gem 'minitest', "~>2.6.0", :require => "minitest/autorun"
+#   gem 'rack-test', :require => "rack/test"
+#   gem 'factory_girl'
+#   gem 'database_cleaner'
+# end

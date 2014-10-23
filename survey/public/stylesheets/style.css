@@ -1,0 +1,84 @@
+body {
+	margin: 20px;
+  font: 14px "Lucida Grande", Helvetica, Arial, sans-serif;
+}
+
+#url-area {
+	width: 30%;
+	min-width: 300px;
+}
+
+.add-shorturl-div {
+	display: none;
+}
+
+.add-shorturl {
+	cursor: pointer;
+}
+
+#groups form {
+	margin: 0;
+}
+
+.group-item {
+	padding: 3px 0;
+	margin-left: -15px;
+	font-size: 15px;
+	cursor: pointer;
+}
+
+.sidebar-nav .btn-toolbar {
+	margin-top: 20px;
+}
+
+#right-side .btn-toolbar {
+	margin-top: 0;
+}
+
+#left-side {
+	margin-top: 60px;
+}
+
+#shorturl-delete, #group-delete {
+	border-left: none;
+}
+
+#qrcode {
+	margin-left: 20px;
+}
+
+.group-item:hover, .urls tr:hover {
+	background-color: #EDEDED;
+}
+
+.urls tr.active:hover:hover {
+	background-color: #C1E1FF;
+}
+
+.active {
+	background-color: #D9EDF7;
+}
+
+i.icon-plus-sign, i.icon-edit {
+	margin-top: 1px !important;
+}
+
+#right-side {
+	margin-left: 5%;
+}
+
+#qrcode-main td {
+	padding: 0 20px 20px 0;
+}
+
+#note {
+	margin-left: 140px;
+}
+
+#example {
+	margin-left: 180px;
+}
+
+#new-url {
+	margin-right: 100px;
+}

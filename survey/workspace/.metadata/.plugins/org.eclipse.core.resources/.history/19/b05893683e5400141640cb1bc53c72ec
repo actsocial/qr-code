@@ -1,0 +1,38 @@
+package asia.wildfire.utils;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+
+public class SortUtils {
+
+	public static <T extends Number> Map<String, T> sortMapByValue(Map<String, T> oriMap,final boolean asc) {
+		Map<String, T> sortedMap = new LinkedHashMap<String, T>();
+		if (oriMap != null && !oriMap.isEmpty()) {
+			List<Map.Entry<String, T>> entryList = new ArrayList<Map.Entry<String, T>>(oriMap.entrySet());
+			Collections.sort(entryList,
+					new Comparator<Map.Entry<String, T>>() {
+						public int compare(Entry<String, T> entry1,
+								Entry<String, T> entry2) {
+							double d = entry1.getValue().doubleValue() - entry2.getValue().doubleValue();
+							if(!asc){
+								d = 0 - d;
+							}
+							return 
+						}
+					});
+			Iterator<Map.Entry<String, T>> iter = entryList.iterator();
+			Map.Entry<String, T> tmpEntry = null;
+			while (iter.hasNext()) {
+				tmpEntry = iter.next();
+				sortedMap.put(tmpEntry.getKey(), tmpEntry.getValue());
+			}
+		}
+		return sortedMap;
+	}
+}

@@ -1,0 +1,137 @@
+extends layout
+
+block append scripts
+  script
+    $(document).ready(function() {
+      $(".group-item").bind("click", function(){
+        var group_id = $(this).attr("id");
+        $(".group-item").each(function(i, item){
+          $(item).removeClass("active");
+        });
+        $(this).addClass("active");
+        $(".urls").each(function(i, table){
+          if ($(table).attr('id') == group_id) {
+            $(table).show();
+          } else {
+            $(table).hide();
+          }
+        });
+        $("#group-form").attr("action", "/urlgroup/"+group_id);
+        $("#group-delete").removeAttr("disabled");
+        $("#group-edit").attr('href', '/urlgroup/'+group_id+'/edit').removeAttr("disabled");
+      });
+      $(".group-item:first").click();
+      $(".urls tbody tr").bind("click", function(event){
+        var shortUrlId = $(this).attr("shortUrlId");
+        // $(".urls tbody tr").each(function(){
+        //   $(this).removeClass("active");
+        // });
+        $(this).addClass("active");
+        var active_trs = 0;
+        $(".urls tbody tr").each(function(){
+          if ($(this).hasClass("active"))
+            active_trs++;
+        });
+        // console.log(active_trs);
+        if (active_trs === 1) {
+          $("#shorturl-form").attr("action", "/url/"+shortUrlId);
+          $("#shorturl-delete").removeAttr("disabled");
+          $("#shorturl-edit").attr('href', '/url/'+shortUrlId+'/edit').removeAttr("disabled");
+        }
+      });
+     
+     /*
+      $('.group-item').popover({
+        placement:  "right",
+        trigger: "click",
+        title: "survey link",
+        html: true,
+        template: '<div class="popover"><div class="arrow"></div><h3 class="popover-title"></h3><div class="popover-content"></div></div>'
+      }); 
+    */
+
+      $("#right-side .radio input").bind("click",function(){
+        var errorCorrectLevel = $(this).val();
+        $("#qrcode").attr("href", "/qrcode/generate?ecl="+errorCorrectLevel);
+      })
+
+    });
+
+block content
+  div.container-fluid
+    div.row-fluid
+      div.span2#left-side
+        div.sidebar-nav
+          ul#groups.nav.nav-list
+            each group in urlgroups
+              li.group-item(id=group.id)
+                i.icon-folder-close
+                | #{group.group_name}
+
+          div.btn-toolbar
+            form#group-form(action="", method="post", onsubmit="return confirm('Do you really want to delete this group?');")
+              div.btn-group
+                a#group-edit.btn.btn-mini.action(disabled="disabled", title="edit")
+                  i.icon-edit
+                  | edit
+                input(type="hidden", name="_method", value="DELETE")
+                button#group-delete.btn.btn-mini.compose.single-item(disabled="disabled", type="submit")
+                  i.icon-trash 
+                  | delete
+                a.btn.btn-mini(href='/urlgroup/new')
+                  i.icon-plus-sign
+                  | add group
+
+      div#right-side.span9
+        div.btn-toolbar
+          form#shorturl-form(action="", method="post")
+            div.btn-group
+              a#shorturl-edit.btn.action(disabled="disabled", title="edit")
+                i.icon-edit
+                | edit
+              input(type="hidden", name="_method", value="DELETE")
+              button#shorturl-delete.btn.compose.single-item(disabled="disabled", type="submit")
+                i.icon-trash 
+                | delete
+              a#new-url.btn(href='/url/new').add-shorturl
+                i.icon-plus-sign
+                | add url
+
+              label.radio.inline
+                input(type="radio",name="optionsRadios", value="minimum")
+                | min
+              label.radio.inline
+                input(type="radio",name="optionsRadios", value="medium")
+                | medium
+              label.radio.inline
+                input(type="radio",name="optionsRadios", value="high")
+                | high
+              label.radio.inline
+                input(type="radio",name="optionsRadios", value="max",checked="checked")
+                | max
+
+              a#qrcode.action.btn(href='/qrcode/generate?ecl=max')
+                i.icon-qrcode
+                | QRCode
+
+        div#main
+          each urlgroup in rs
+            table.table.urls(id=urlgroup[0])
+              thead
+                th long url
+                th short url
+                th remark
+                th updated time
+              each shorturl in urlgroup[3]
+                tr(shortUrlId=shorturl.id)
+                  td.longurl
+                    a(href=shorturl.longurl, target="_blank") #{shorturl.longurl}
+                  td.shorturl
+                    a(href=shorturl.shorturl, target="_blank") #{shorturl.shorturl}
+                  td #{shorturl.remark}
+                  td #{shorturl.updatedAt}
+
+
+
+
+

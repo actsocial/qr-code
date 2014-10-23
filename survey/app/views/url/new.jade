@@ -1,0 +1,30 @@
+extends ../layout
+
+block content
+  - var action = '/url'
+  p
+    span#note.label.label-info Note
+    |  Please input the url and remark seprated by ",",
+    |  using ";" between pairs.
+    br
+    span#example
+    |  Example: "http://m.xingxinghuo.com/1,store1;
+    |            http://m.xingxinghuo.com/2,store2;"
+
+  form.form-horizontal(method="post", action=action, enctype="multipart/form-data")
+    div.control-group
+      label.control-label long url
+      div.controls
+        textarea.span4(type='text', name='url-text', rows="10").input-shorturl
+
+    div.control-group
+      label.control-label group name
+      div.controls
+        select(name='group_id')
+          each urlgroup in urlgroups
+            option(value=urlgroup.id) #{urlgroup.group_name}
+            
+    div.control-group
+      div.controls
+        button.group-confirm.btn.btn-success.btn-small(type='submit') Save changes
+        a.btn.btn-small(href='/index', title="cancel") Cancel

@@ -1,0 +1,18 @@
+extends ../layout
+
+block content
+  div#qrcode-main
+    each values, group_name in groups
+      h3 #{group_name}
+      table
+        each value, i in values
+          - if (i % 5 === 0)
+            tr
+          each url, shorturl in value
+            td
+              a(href=shorturl) #{shorturl}
+              span 
+              each remark, short in remark_hash
+               if shorturl == short
+                 p= remark
+              img(src=url)

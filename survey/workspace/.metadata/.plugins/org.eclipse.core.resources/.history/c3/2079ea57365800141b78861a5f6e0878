@@ -1,0 +1,310 @@
+package asia.wildfire.connection;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.util.Calendar;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import asia.wildfire.actsocial.dao.ModuleDao;
+import asia.wildfire.actsocial.impl.ActsocialDataServiceImpl;
+import com.amazonaws.services.sqs.model.CreateQueueRequest;
+import com.amazonaws.services.sqs.model.DeleteMessageRequest;
+import com.amazonaws.services.sqs.model.Message;
+import com.amazonaws.services.sqs.model.ReceiveMessageRequest;
+import com.google.common.collect.Maps;
+import com.sun.org.glassfish.gmbal.Description;
+import org.junit.Test;
+
+import asia.wildfire.actsocial.model.Module;
+import asia.wildfire.utils.DateUtils;
+import asia.wildfire.utils.JsonParser;
+
+import junit.framework.TestCase;
+
+public class SQSTest extends TestCase{
+
+	@Test
+	public void testEnqueue(){
+			List<Module> modules = Module.getToRunModules(DateUtils.getMidNight());
+			for (Module module2 : modules) {
+				if(!"retailer".equals(module2.getScope())){
+					if(module2.getPriority().equals(5)){
+						SQS.pushTo("actsocial_queue_5", module2.getScope());
+					}else{
+						SQS.pushTo("actsocial_queue", module2.getScope());
+					}
+				}
+				
+			}
+	}
+	
+	@Test
+	public void testEnqueueByParent(){
+		Module module = Module.loadByScope("retailer");
+		SQS.pushTo(SQS.Name.ACTSOCIAL_QUEUE, module.getScope());
+		List<Module> modules = module.getChildModules();
+		for (Module module2 : modules) {
+			SQS.pushTo(SQS.Name.ACTSOCIAL_QUEUE, module2.getScope());
+		}
+	}
+
+    @Test
+    public void testEnqueueWeibo(){
+        ModuleDao moduleDao = new ModuleDao();
+        List<Module> moduleList = moduleDao.queryByCond(new String[]{"module_type", "enable"}, new String[]{"=", "="}, new Object[]{"weibo", true});
+        for (Module module2 : moduleList) {
+            SQS.pushTo("test_actsocial_queue_5", module2.getScope());
+        }
+
+//        String[] ss = {"38", "42", "43", "53", "54", "63", "97", "156", "158", "160", "162", "174", "175", "177", "178", "179", "180", "191", "192", "221", "224", "226", "228", "232", "233", "235", "237", "253", "254", "261", "263", "271", "274", "277", "278", "281", "282", "284", "285", "288", "290", "292", "294", "309", "310", "312", "313", "315", "316", "318", "319", "321", "322", "323", "325", "326"};
+//
+//        String[] weiboQ = {"42", "43", "54", "63", "64", "97", "156", "160", "162", "175", "179", "191", "228", "232", "235", "237", "253", "261", "263", "281", "284", "285", "288", "290", "312", "313", "315", "316", "318", "319", "321", "322", "323"};
+//        String[] fansQ = {"277", "285", "294", "309", "310", "312", "313", "315", "316", "318", "319", "321", "322", "323"};
+//        for (String str : ss) {
+//            SQS.pushTo("follower_queue", str);
+//            SQS.pushTo("timeline_queue", str);
+//        }
+
+//        for (String str : weiboQ) {
+//            SQS.pushTo("timeline_queue", str);
+//        }
+//
+//        for (String str : fansQ) {
+//            SQS.pushTo("follower_queue", str);
+//        }
+    }
+	
+	@Test
+	public void testEnqueue2(){
+		Map<String, String> map = Maps.newHashMap();
+        map.put("scope", "Toread");
+        map.put("period", "20140101-20140301");
+        SQS.pushTo(SQS.Name.ACTSOCIAL_CUSTOM_RANGE_QUEUE, JsonParser.map2Json(map));
+
+    }
+	
+	@Test
+	public void testEnqueueTopicData(){
+		ModuleDao dao = new ModuleDao();
+        List<Module> modules = dao.queryBySql("scope LIKE '%thou%'");
+//		String[] scopes = new String[]{"thousands_hitachi"};
+		for (Module m : modules) {
+			SQS.pushTo(SQS.Name.TOPIC_DATA_QUEUE,m.getScope()+"|"+"14"+"|a");
+		}
+	}
+
+    @Test
+    public void testGetTopicData() {
+        String topicData = "Carrefour|90";
+        String[] ps = topicData.split("[|]");
+        System.out.println(ps);
+    }
+	
+	@Test
+	public void testEnqueueThreadDataWithoutMax(){
+        ActsocialDataServiceImpl actsocialDataService = new ActsocialDataServiceImpl();
+        actsocialDataService.enqueueParent5();
+        actsocialDataService.enqueueParent0();
+//        String[] scopes = {"Jetset_city", "Jetset_sea", "Jetset_ski"};
+//        for(String str : scopes) {
+//            Module m = Module.loadByScope(str);
+//            SQS.enqueueStart(m);
+//        }
+	}
+	
+	@Test
+	public void testWeiboModuleEnqueue(){
+		Module module = Module.loadByScope("Bayern");
+		Map<String,Object> map = new HashMap<String,Object>();
+		map.put("sns_id", 2);
+		map.put("keyword", "FOTILE~方太");
+
+		map.put("scope", module.getScope());
+		map.put("count", "30");
+		map.put("onlynum", module.isOnlynum());
+//		map.put("from", "actsocial");
+		map.put("date", 1375853157000L/1000);
+		SQS.pushTo(SQS.Name.BUZZ_QUEUE, JsonParser.map2Json(map));
+	}
+	
+	@Test
+	public void testAddBuzz(){
+		Map<String,Object> map = new HashMap<String,Object>();
+		map.put("sns_id", 2);
+		map.put("keyword", "JetSet 假期是去世界上最美的城市");
+		map.put("scope", "");
+		map.put("count", "90");
+		map.put("onlynum", 0);
+		map.put("date", System.currentTimeMillis()/1000);
+		SQS.pushTo("run_buzz_range_day", JsonParser.map2Json(map));
+	}
+	
+	@Test
+	public void testAddAllBuzz(){
+			List<Module> modules = Module.getToRunModules(DateUtils.getMidNight(System.currentTimeMillis()+24*3600*1000));
+			for (Module module : modules) {
+				if (!module.isOnlynum()) {
+					Map<String,Object> map = new HashMap<String,Object>();
+					map.put("sns_id", 2);
+					map.put("keyword", module.getBuzzKeyword());
+					map.put("scope", module.getScope());
+					map.put("count", "7");
+					map.put("onlynum", false);
+					map.put("date", System.currentTimeMillis()/1000);
+					SQS.pushTo(SQS.Name.BUZZ_QUEUE, JsonParser.map2Json(map));
+				}
+				
+			}
+	}
+
+	@Test
+	public void testPushInitBuzz(){
+		Map<String,Long> mm = new HashMap<String,Long>();
+		mm.put("7-Eleven",1372002465000L);
+		mm.put("好德",1372002471000L);
+		mm.put("喜士多",1371283430000L);
+		mm.put("家乐福",1373772692000L);
+		mm.put("城市超市",1371262044000L);
+		mm.put("全家便利",1372004232000L);
+		mm.put("华联",1372088501000L);
+		mm.put("汇金百货",1372004407000L);
+		mm.put("可的便利",1371284571000L);
+		mm.put("罗森",1372086984000L);
+		mm.put("良友",1373689327000L);
+		mm.put("联华",1372027111000L);
+		mm.put("麦德龙",1372088455000L);
+		mm.put("农工商",1372088509000L);
+		mm.put("百佳",1373129998000L);
+		mm.put("快客",1372091153000L);
+		mm.put("大润发",1372591868000L);
+		mm.put("乐购 -乐购仕 -欢乐购 -快乐购 -麦乐购",1373089709000L);
+		mm.put("沃尔玛",1372086183000L);
+
+
+		String[] keywords = new String[]{"7-Eleven","All_Days","C-store","Carrefour","City_Shop","Family_Mart","hualian","huijinbaihuo","Kedi","Lawson","liangyou","lianhua","Metro","ngs","PARKnSHOP","Quik","RT-Mart","Tesco","Walmart"};
+		
+		for (String string : keywords) {
+			Module module = Module.loadByScope(string);
+			Map<String,Object> map = new HashMap<String,Object>();
+			map.put("sns_id", 2);
+			map.put("keyword", module.getBuzzKeyword());
+			map.put("scope", module.getScope());
+			map.put("count", "90");
+			map.put("onlynum", false);
+			map.put("date", (mm.get(module.getBuzzKeyword())/1000)-1);
+			System.out.println("push to buzz queue:"+map);
+			SQS.pushTo("init_buzz_queue", JsonParser.map2Json(map));
+		}
+	}
+
+    @Test
+    public void testEnqueueTopic()  {
+        String[] module = {"Australia_study", "Monash", "SIBT", "Taylors", "UNSW", "UTS", "UWS"};
+        String[] topic = {"专业", " 就业", " 环境", " 学费", " 考试", " 活动", " 奖学金", " 教学质量", " 薪资", " 移民", " 签证", " 预科", " 住宿", " 录取", " 排名", " 留学生", " 留学途径"};
+
+
+    }
+	
+	@Test
+	public void testDequeue(){
+		while(true){
+			System.out.println(SQS.popFrom("actsocial_hourly_queue"));
+		}
+    }
+
+    @Test
+    public void testPushBuzzkeyword() {
+//        String[] sts={"携程", "艺龙", "去哪儿网"};
+//        Integer[] ins = {13, 14, 15, 16, 17, 18, 19, 20, 21, 22};
+//        for (Integer inn : ins) {
+//            for (String str : sts) {
+//                Calendar calendar = DateUtils.getMidNight();
+                Map<String,Object> map = new HashMap<String,Object>();
+                map.put("sns_id", 2);
+                map.put("keyword", "JetSet 假期是去世界上最美的城市");
+                map.put("scope", "");
+                map.put("count", "30");
+                map.put("onlynum", 0);
+//                map.put("buzz_get_num", 1000);
+                map.put("date", System.currentTimeMillis()/1000);
+                System.out.println("push to buzz queue:"+map);
+                SQS.pushTo(SQS.Name.BUZZ_QUEUE, JsonParser.map2Json(map));
+//            }
+//        }
+//        for (int i=0;i<5;i++) {
+//            String str = "多特~Dortmund";
+//            Map<String,Object> map = new HashMap<String,Object>();
+//            map.put("sns_id", 2);
+//            map.put("keyword", str);
+//            map.put("scope", str);
+//            map.put("count", "5");
+//            map.put("onlynum", 0);
+//            map.put("buzz_get_num", 100);
+//            map.put("from", "test_buzz");
+//            map.put("date", System.currentTimeMillis()/1000);
+//            System.out.println("push to buzz queue:"+map);
+//            SQS.pushTo("test_buzz", JsonParser.map2Json(map));
+//        }
+    }
+
+    public static void main(String[] args) throws Exception {
+    }
+
+    @Test
+    public void testDeleteFromQueue() {//timeline_queue
+        for (int i=0; i< 10000; i++) {
+//            SQS.popFrom("timeline_queue");
+//            SQS.popFrom("follower_queue");
+            String str = SQS.popFrom("actsocial_queue");
+            System.out.println(str);
+//            str = SQS.popFrom("actsocial_queue_5");
+//            System.out.println(str);
+//            str = SQS.popFrom("actsocial_queue");
+//            System.out.println(str);
+        }
+    }
+
+    @Test
+    public void testDeleteFromQueue2() throws Exception {//timeline_queue
+        String queueUrl = SQS.getConnection().createQueue(new CreateQueueRequest("actsocial_hourly_queue")).getQueueUrl();
+        ReceiveMessageRequest receiveMessageRequest = new ReceiveMessageRequest(queueUrl);
+        receiveMessageRequest.setMaxNumberOfMessages(10);
+        List<Message> messages = SQS.getConnection().receiveMessage(receiveMessageRequest).getMessages();
+        while (messages.size() > 0 ) {
+            for (Message message : messages) {
+                String messageRecieptHandle = message.getReceiptHandle();
+                SQS.getConnection().deleteMessage(new DeleteMessageRequest(receiveMessageRequest.getQueueUrl(), messageRecieptHandle));
+                System.out.println(message.getBody());
+            }
+            messages = SQS.getConnection().receiveMessage(receiveMessageRequest).getMessages();
+        }
+    }
+
+    @Test
+    public void testEnqueueHourlyQueue() {
+        //SQS.Name.ACTSOCIAL_HOURLY_QUEUE
+        SQS.pushTo("actsocial_hourly_queue", "Walmart");
+        String [] sss = new String[] {"38" , "42" , "43" , "233" , "261" , "263" , "274" , "323" , "325" , "331" , "334" , "335" , "344"};
+        for (String str : sss) {
+//            SQS.pushTo("follower_queue", str);
+            SQS.pushTo("timeline_queue", str);
+        }
+    }
+
+    @Test
+    public void testEnqueueThousandModule() {
+        String sql = "SELECT * FROM modules WHERE onlynum=1";
+
+        ModuleDao dao = new ModuleDao();
+        List<Module> modules = dao.queryBySql("onlynum=1");
+        for (Module mo : modules) {
+            SQS.enqueueStart(mo);
+        }
+        System.out.println(modules.size());
+    }
+}

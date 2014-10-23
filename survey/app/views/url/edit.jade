@@ -1,0 +1,30 @@
+extends ../layout
+
+block content
+  form.form-horizontal(method="post", action='/url/'+url.id, enctype="multipart/form-data")
+    div.control-group
+      label.control-label url
+      div.controls
+        input.span3(type='text', name='url', value=url.longurl).input-shorturl
+
+    div.control-group
+      label.control-label group name
+      div.controls
+        select(name='group_id')
+          each urlgroup in urlgroups
+            - if (url.UrlGroupId === urlgroup.id)
+                option(value=urlgroup.id, selected) #{urlgroup.group_name}
+            - else
+                option(value=urlgroup.id) #{urlgroup.group_name}
+    div.control-group
+      label.control-label remark
+      div.controls
+       input(type='text', name='remark', value=url.remark).input-remark
+
+    div.control-group
+      div.controls
+        input(type="hidden", name="_method", value="PUT")
+        button.group-confirm.btn.btn-success.btn-small(type='submit') Save changes
+        a.btn.btn-small(href='/index', title="cancel") Cancel
+
+

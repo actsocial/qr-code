@@ -1,0 +1,101 @@
+package asia.wildfire.embed;
+
+import java.io.IOException;
+
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.IntField;
+import org.apache.lucene.document.StringField;
+import org.apache.lucene.document.TextField;
+import org.apache.lucene.document.Field.Store;
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.util.Version;
+import org.apache.solr.core.CoreContainer;
+import org.apache.solr.core.SolrCore;
+import org.apache.solr.request.LocalSolrQueryRequest;
+import org.apache.solr.search.LuceneQParserPlugin;
+import org.apache.solr.search.SolrIndexSearcher;
+import org.apache.solr.servlet.DirectSolrConnection;
+import org.apache.solr.update.SolrCoreState;
+import org.apache.solr.update.SolrIndexWriter;
+import org.apache.solr.util.RefCounted;
+import org.wltea.analyzer.lucene.IKAnalyzer;
+
+import asia.wildfire.utils.URLUtils;
+
+public class SolrServer {
+	
+	protected volatile CoreContainer cores;
+
+	protected String abortErrorMessage = null;
+	
+	private boolean started = false;
+
+	public void start(){
+		
+	    CoreContainer.Initializer init = createInitializer();
+	    try {
+
+	      this.cores = init.initialize();
+	      started = true;
+	    }
+	    catch( Throwable t ) {
+	      // catch this so our filter still works
+	      SolrCore.log( t );
+	    }
+
+	}
+	
+	public void doIndex() throws IOException{
+		if(this.started){
+			SolrCore core = this.cores.getCore(null);
+			SolrCoreState solrCoreState = core.getSolrCoreState();
+			RefCounted<IndexWriter> iw = solrCoreState.getIndexWriter(core);
+			IndexWriter writer = iw.get();
+			
+			for (int i = 0; i < 100; i++) {
+				Document document = new Document();  
+				document.add(new StringField("id",String.valueOf(i), Store.YES));
+	            document.add(new TextField("body_text","Ikea good, 今天喝了新的奶粉，很好喝",Store.NO));
+	            document.add(new IntField("page_is",5,Store.YES));
+				writer.addDocument(document,new IKAnalyzer());
+			}
+			writer.commit();
+			System.out.println(writer.numDocs());
+			writer.close();
+			
+			
+		}
+	}
+	
+	public void doSearch(String expression) throws Exception{
+		SolrCore core = this.cores.getCore(null);
+		DirectSolrConnection dsc = new DirectSolrConnection(core);
+		String url = "/select?indent=true&wt=json&q=*%3A"+URLUtils.encodeURL(expression,"UTF-8");
+		System.out.println(url);
+		String json = dsc.request(url, null);
+		System.out.println(json);
+	}
+	
+	
+	protected CoreContainer.Initializer createInitializer() {
+		return new CoreContainer.Initializer();
+	}
+	
+	public static void main(String[] args) throws Exception {
+		SolrServer server = new SolrServer();
+		server.start();
+		server.doIndex();
+		for (int i = 0; i < 1; i++) {
+			server.doSearch("*");
+		}
+		System.out.println("end");
+	}
+}

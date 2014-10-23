@@ -1,0 +1,96 @@
+package asia.wildfire.task;
+
+import java.util.Calendar;
+import java.util.HashMap;
+import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
+
+import asia.wildfire.model.Module;
+import asia.wildfire.model.Sns;
+import asia.wildfire.model.SnsWrapper;
+import asia.wildfire.service.SnsService;
+
+public class BuzzCollector implements Runnable {
+	
+	
+	private ConcurrentLinkedQueue<Module> queue = new ConcurrentLinkedQueue<Module>();
+	
+	public static Sns constructSns() {
+        Sns sns = new Sns();
+        sns.setUsername("home@wildfire.asia");
+        sns.setPassword("wudinglu550");
+        sns.setAccessToken("2.009l8yFCeXuwhD420d882846hBaTBD");
+        return sns;
+    }
+	
+	@Override
+	public void run() {
+		ThreadGroup threadGroup = new ThreadGroup("buzz");
+		for (int i = 0; i < 5; i++) {
+			Thread t = new Thread(threadGroup, new Runnable() {
+				
+				@Override
+				public void run() {
+					// TODO Auto-generated method stub
+					while(true){
+						Module m = queue.poll();
+						if(m == null){
+							System.out.println("sleep");
+							try {
+								synchronized (queue) {
+									queue.wait();
+								}
+							} catch (InterruptedException e) {
+								e.printStackTrace();
+							}
+						}else{
+							long end = System.currentTimeMillis();
+							long start = end - 20*60*1000;
+							if(m.getLastThreadTime() == null){
+								start = m.getLastBuzzTime().getTime();
+							}
+							if(end - start > 5*60*1000){
+								System.out.println("run module "+ m.getScope());
+								SnsWrapper sns = new SnsWrapper(constructSns());
+				                SnsService snsService = new SnsService(sns, "buzz");
+				                snsService.loadKeywordBuzz(m.getBuzzKeyword(), start, end, new HashMap<String, String>());
+				                Calendar nowCal = Calendar.getInstance();
+				                nowCal.setTimeInMillis(end);
+				                long buzzStart = asia.wildfire.utils.DateUtils.getNDaysAgo(nowCal, 180).getTime().getTime();
+				                snsService.loadKeywordBuzzVolumeByDay(m.getBuzzKeyword(), buzzStart, end, new HashMap<String, String>());
+				                //TODO update last buzz date
+							}
+							
+						}
+					}
+				}
+			});
+			t.start();
+		}
+		while(true){
+			List<Module> modules = Module.getAllEnableModules();
+			for (Module module : modules) {
+				if(("brand".equals(module.getModuleType()) || "industry".equals(module.getModuleType())) && module.getBuzzKeyword()!=null && !"".equals(module.getBuzzKeyword().trim())){
+					queue.add(module);
+				}
+			}
+			synchronized (queue) {
+				queue.notifyAll();
+			}
+			
+			try {
+				Thread.sleep(15*60*1000);
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+	}
+	
+	public static void main(String[] args) {
+		BuzzCollector bc = new BuzzCollector();
+		bc.run();
+	}
+
+	
+}

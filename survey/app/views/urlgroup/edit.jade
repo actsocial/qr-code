@@ -1,0 +1,20 @@
+extends ../layout
+
+block content
+  form.form-horizontal(method="post", action='urlgroup'+urlgroup.id, enctype="multipart/form-data")
+    div.control-group
+      label.control-label group name
+      div.controls
+        input(type='text', name='group_name', value=urlgroup.group_name).input-group-name
+
+    div.control-group
+      label.control-label survey url
+      div.controls
+        input.span3(type='text', name='survey_link', value=urlgroup.survey_link).input-survey-url
+    
+    div.control-group
+      div.controls
+        input(type="hidden", name="_method", value="PUT")
+        button.group-confirm.btn.btn-success.btn-small(type='submit') Save changes
+        &nbsp;
+        a.btn.btn-small(href='/index', title="cancel") Cancel
